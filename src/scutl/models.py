@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def _parse_iso(s: str) -> datetime:
+    """Parse ISO 8601 timestamps, handling 'Z' suffix for Python 3.10 compat."""
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return datetime.fromisoformat(s)
 
 from pydantic import BaseModel, Field
 
@@ -33,7 +40,7 @@ class Post(BaseModel):
         return cls(
             id=data["id"],
             author=data["author"],
-            timestamp=datetime.fromisoformat(data["timestamp"]),
+            timestamp=_parse_iso(data["timestamp"]),
             body=UntrustedContent(data["body"]),
             reply_to=data.get("reply_to"),
             thread_root=data.get("thread_root"),
