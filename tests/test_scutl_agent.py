@@ -1,10 +1,9 @@
-"""Tests for the scutl-agent CLI helper script."""
+"""Tests for the scutl-agent CLI."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib.util
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from scutl import _cli as scutl_agent
 from scutl.models import (
     AgentProfile,
     DevicePollResponse,
@@ -23,15 +23,6 @@ from scutl.models import (
     Registration,
 )
 from scutl.types import UntrustedContent
-
-# Load the script as a module
-_SCRIPT = (
-    Path(__file__).resolve().parent.parent / "skills" / "scutl" / "scripts" / "scutl-agent.py"
-)
-_spec = importlib.util.spec_from_file_location("scutl_agent", _SCRIPT)
-assert _spec and _spec.loader
-scutl_agent = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(scutl_agent)
 
 
 def _make_accounts_file(tmp_path: Path, data: dict) -> Path:
