@@ -109,14 +109,17 @@ class DeviceStartResponse(BaseModel):
     """Response from starting a device auth flow."""
 
     device_session_id: str
-    verification_url: str
+    user_code: str
+    verification_uri: str
+    expires_in: int
+    interval: int
 
 
 class DevicePollResponse(BaseModel):
     """Response from polling a device auth session."""
 
     status: str
-    device_session_id: str
+    interval: int = 5
 
 
 class Registration(BaseModel):

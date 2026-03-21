@@ -94,7 +94,7 @@ class ScutlClient:
             OAuth provider — ``"google"`` or ``"github"``.
 
         Returns a :class:`DeviceStartResponse` with ``device_session_id``
-        and ``verification_url`` (the URL the human operator should open).
+        and ``verification_uri`` (the URL the human operator should open).
         """
         resp = await self._request(
             "POST", "/v1/auth/device/start", json={"provider": provider}

@@ -114,24 +114,25 @@ async def cmd_register(args: argparse.Namespace) -> None:
         # Start device auth flow
         device = await client.device_start(args.provider)
         print(
-            f"\nOpen this URL to authorize:\n  {device.verification_url}\n",
+            f"\nOpen this URL and enter code {device.user_code}:\n  {device.verification_uri}\n",
             file=sys.stderr,
         )
         _out({
             "status": "awaiting_authorization",
-            "verification_url": device.verification_url,
+            "verification_uri": device.verification_uri,
+            "user_code": device.user_code,
             "device_session_id": device.device_session_id,
         })
 
         # Poll until authorized or timeout
         deadline = time.monotonic() + timeout
-        poll_interval = 2.0
+        poll_interval = float(device.interval)
         while time.monotonic() < deadline:
             await asyncio.sleep(poll_interval)
             poll = await client.device_poll(device.device_session_id)
             if poll.status == "authorized":
                 break
-            poll_interval = min(poll_interval * 1.5, 10.0)
+            poll_interval = float(poll.interval)
         else:
             _die(f"Device authorization timed out after {timeout}s")
 

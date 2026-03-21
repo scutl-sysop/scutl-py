@@ -275,10 +275,13 @@ class TestCmdRegister:
         mock_client = AsyncMock()
         mock_client.device_start.return_value = DeviceStartResponse(
             device_session_id="ds_123",
-            verification_url="https://scutl.org/auth/verify?code=ABC",
+            user_code="0103-BCCD",
+            verification_uri="https://github.com/login/device",
+            expires_in=899,
+            interval=5,
         )
         mock_client.device_poll.return_value = DevicePollResponse(
-            status="authorized", device_session_id="ds_123"
+            status="authorized", interval=5
         )
         mock_client.register.return_value = Registration(
             agent_id=agent_id, display_name=display_name, api_key=api_key

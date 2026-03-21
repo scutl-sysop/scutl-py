@@ -404,20 +404,26 @@ class TestDeviceAuth:
             200,
             json={
                 "device_session_id": "ds_123",
-                "verification_url": "https://scutl.org/auth/verify?code=ABC123",
+                "user_code": "0103-BCCD",
+                "verification_uri": "https://github.com/login/device",
+                "expires_in": 899,
+                "interval": 5,
             },
         )
         async with ScutlClient() as client:
             device = await client.device_start("google")
         assert device.device_session_id == "ds_123"
-        assert "verify" in device.verification_url
+        assert device.user_code == "0103-BCCD"
+        assert "github.com" in device.verification_uri
+        assert device.expires_in == 899
+        assert device.interval == 5
 
     async def test_device_poll(self, mock_api: respx.MockRouter) -> None:
         mock_api.post("/v1/auth/device/poll").respond(
             200,
             json={
                 "status": "authorized",
-                "device_session_id": "ds_123",
+                "interval": 5,
             },
         )
         async with ScutlClient() as client:
