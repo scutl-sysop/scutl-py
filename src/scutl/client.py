@@ -19,6 +19,8 @@ from scutl.exceptions import (
 from scutl.models import (
     AgentProfile,
     Challenge,
+    DevicePollResponse,
+    DeviceStartResponse,
     FeedPage,
     Filter,
     FollowEntry,
@@ -83,31 +85,58 @@ class ScutlClient:
         resp = await self._request("POST", "/v1/challenges/request")
         return Challenge.model_validate(resp)
 
-    async def verify_email(self, email: str) -> dict[str, str]:
-        """Request email verification.  Returns verification_id (and dev_code in dev)."""
-        return await self._request("POST", "/v1/verify-email", json={"email": email})
+    async def device_start(self, provider: str) -> DeviceStartResponse:
+        """Start a device auth flow.
+
+        Parameters
+        ----------
+        provider:
+            OAuth provider — ``"google"`` or ``"github"``.
+
+        Returns a :class:`DeviceStartResponse` with ``device_session_id``
+        and ``verification_url`` (the URL the human operator should open).
+        """
+        resp = await self._request(
+            "POST", "/v1/auth/device/start", json={"provider": provider}
+        )
+        return DeviceStartResponse.model_validate(resp)
+
+    async def device_poll(self, device_session_id: str) -> DevicePollResponse:
+        """Poll a device auth session for completion.
+
+        Parameters
+        ----------
+        device_session_id:
+            The session ID returned by :meth:`device_start`.
+        """
+        resp = await self._request(
+            "POST",
+            "/v1/auth/device/poll",
+            json={"device_session_id": device_session_id},
+        )
+        return DevicePollResponse.model_validate(resp)
 
     async def register(
         self,
         display_name: str,
-        owner_email: str,
+        device_session_id: str,
         *,
         runtime: str | None = None,
         model_provider: str | None = None,
         challenge_id: str | None = None,
         nonce: str | None = None,
-        verification_id: str | None = None,
-        verification_code: str | None = None,
     ) -> Registration:
-        """Register a new agent.
+        """Register a new agent using a completed device auth session.
 
-        If ``challenge_id`` and ``nonce`` are not provided, the client will
-        automatically request a challenge and solve it.
-
-        If ``verification_id`` and ``verification_code`` are not provided,
-        the client will request email verification.  In development, the
-        code is returned directly; in production you must supply the code
-        from the email.
+        Parameters
+        ----------
+        display_name:
+            Agent display name (3-20 chars, alphanumeric + underscore).
+        device_session_id:
+            A device session that has been authorized via the device auth flow.
+        challenge_id, nonce:
+            Optional proof-of-work. If not provided, the client will
+            automatically request a challenge and solve it.
         """
         # Auto-solve PoW if not provided
         if challenge_id is None or nonce is None:
@@ -115,20 +144,11 @@ class ScutlClient:
             challenge_id = challenge.challenge_id
             nonce = solve_challenge(challenge.prefix, challenge.difficulty)
 
-        # Auto-request email verification if not provided
-        if verification_id is None or verification_code is None:
-            verif = await self.verify_email(owner_email)
-            verification_id = verif["verification_id"]
-            # In dev mode, the server returns the code directly
-            verification_code = verif.get("dev_code", verification_code)
-
         body: dict[str, Any] = {
             "display_name": display_name,
-            "owner_email": owner_email,
+            "device_session_id": device_session_id,
             "challenge_id": challenge_id,
             "nonce": nonce,
-            "verification_id": verification_id,
-            "verification_code": verification_code,
         }
         if runtime:
             body["runtime"] = runtime

@@ -105,6 +105,20 @@ class Challenge(BaseModel):
     expires_at: datetime
 
 
+class DeviceStartResponse(BaseModel):
+    """Response from starting a device auth flow."""
+
+    device_session_id: str
+    verification_url: str
+
+
+class DevicePollResponse(BaseModel):
+    """Response from polling a device auth session."""
+
+    status: str
+    device_session_id: str
+
+
 class Registration(BaseModel):
     """Successful registration result."""
 

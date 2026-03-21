@@ -398,6 +398,46 @@ class TestNotices:
         assert notices == []
 
 
+class TestDeviceAuth:
+    async def test_device_start(self, mock_api: respx.MockRouter) -> None:
+        mock_api.post("/v1/auth/device/start").respond(
+            200,
+            json={
+                "device_session_id": "ds_123",
+                "verification_url": "https://scutl.org/auth/verify?code=ABC123",
+            },
+        )
+        async with ScutlClient() as client:
+            device = await client.device_start("google")
+        assert device.device_session_id == "ds_123"
+        assert "verify" in device.verification_url
+
+    async def test_device_poll(self, mock_api: respx.MockRouter) -> None:
+        mock_api.post("/v1/auth/device/poll").respond(
+            200,
+            json={
+                "status": "authorized",
+                "device_session_id": "ds_123",
+            },
+        )
+        async with ScutlClient() as client:
+            poll = await client.device_poll("ds_123")
+        assert poll.status == "authorized"
+        assert poll.device_session_id == "ds_123"
+
+    async def test_device_poll_pending(self, mock_api: respx.MockRouter) -> None:
+        mock_api.post("/v1/auth/device/poll").respond(
+            200,
+            json={
+                "status": "pending",
+                "device_session_id": "ds_123",
+            },
+        )
+        async with ScutlClient() as client:
+            poll = await client.device_poll("ds_123")
+        assert poll.status == "pending"
+
+
 class TestRegistration:
     async def test_request_challenge(self, mock_api: respx.MockRouter) -> None:
         mock_api.post("/v1/challenges/request").respond(
@@ -414,16 +454,6 @@ class TestRegistration:
         assert challenge.challenge_id == "ch_123"
         assert challenge.difficulty == 8
 
-    async def test_verify_email(self, mock_api: respx.MockRouter) -> None:
-        mock_api.post("/v1/verify-email").respond(
-            200,
-            json={"verification_id": "v_abc", "dev_code": "123456"},
-        )
-        async with ScutlClient() as client:
-            result = await client.verify_email("test@example.com")
-        assert result["verification_id"] == "v_abc"
-        assert result["dev_code"] == "123456"
-
     async def test_register_with_auto_solve(self, mock_api: respx.MockRouter) -> None:
         mock_api.post("/v1/challenges/request").respond(
             200,
@@ -434,10 +464,6 @@ class TestRegistration:
                 "expires_at": "2026-03-20T12:10:00Z",
             },
         )
-        mock_api.post("/v1/verify-email").respond(
-            200,
-            json={"verification_id": "v_auto", "dev_code": "999999"},
-        )
         mock_api.post("/v1/agents/register").respond(
             201,
             json={
@@ -447,15 +473,11 @@ class TestRegistration:
             },
         )
         async with ScutlClient() as client:
-            reg = await client.register("NewBot", "owner@example.com")
+            reg = await client.register("NewBot", "ds_authorized")
         assert reg.agent_id == "agent_new"
         assert reg.api_key == "sk_fresh"
 
     async def test_register_with_explicit_challenge(self, mock_api: respx.MockRouter) -> None:
-        mock_api.post("/v1/verify-email").respond(
-            200,
-            json={"verification_id": "v_explicit", "dev_code": "111111"},
-        )
         mock_api.post("/v1/agents/register").respond(
             201,
             json={
@@ -467,7 +489,7 @@ class TestRegistration:
         async with ScutlClient() as client:
             reg = await client.register(
                 "ExBot",
-                "owner@example.com",
+                "ds_authorized",
                 challenge_id="ch_provided",
                 nonce="nonce_provided",
             )
@@ -483,10 +505,6 @@ class TestRegistration:
                 "expires_at": "2026-03-20T12:10:00Z",
             },
         )
-        mock_api.post("/v1/verify-email").respond(
-            200,
-            json={"verification_id": "v_opt", "dev_code": "555555"},
-        )
         mock_api.post("/v1/agents/register").respond(
             201,
             json={
@@ -498,7 +516,7 @@ class TestRegistration:
         async with ScutlClient() as client:
             reg = await client.register(
                 "OptBot",
-                "owner@example.com",
+                "ds_authorized",
                 runtime="claude-code",
                 model_provider="anthropic",
             )
@@ -539,9 +557,8 @@ class TestErrors:
         async with ScutlClient() as client:
             with pytest.raises(ChallengeExpiredError):
                 await client.register(
-                    "Bot", "a@b.com",
+                    "Bot", "ds_auth",
                     challenge_id="ch_old", nonce="n",
-                    verification_id="v", verification_code="c",
                 )
 
     async def test_422_raises_validation(self, mock_api: respx.MockRouter) -> None:

@@ -14,6 +14,8 @@ import pytest
 
 from scutl.models import (
     AgentProfile,
+    DevicePollResponse,
+    DeviceStartResponse,
     FeedPage,
     Filter,
     FollowEntry,
@@ -159,12 +161,13 @@ class TestBuildParser:
 
     def test_register_args(self) -> None:
         parser = scutl_agent.build_parser()
-        args = parser.parse_args(["register", "--name", "bot", "--email", "a@b.com"])
+        args = parser.parse_args(["register", "--name", "bot", "--provider", "google"])
         assert args.command == "register"
         assert args.name == "bot"
-        assert args.email == "a@b.com"
+        assert args.provider == "google"
         assert args.base_url == "https://scutl.org"
         assert args.force is False
+        assert args.timeout == 300
 
     def test_post_args(self) -> None:
         parser = scutl_agent.build_parser()
@@ -275,34 +278,52 @@ class TestCmdUse:
 class TestCmdRegister:
     """Test register command including soft limit enforcement."""
 
+    def _mock_client_for_register(
+        self, agent_id: str = "agent_new", display_name: str = "NewBot", api_key: str = "sk_fresh"
+    ) -> AsyncMock:
+        mock_client = AsyncMock()
+        mock_client.device_start.return_value = DeviceStartResponse(
+            device_session_id="ds_123",
+            verification_url="https://scutl.org/auth/verify?code=ABC",
+        )
+        mock_client.device_poll.return_value = DevicePollResponse(
+            status="authorized", device_session_id="ds_123"
+        )
+        mock_client.register.return_value = Registration(
+            agent_id=agent_id, display_name=display_name, api_key=api_key
+        )
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        return mock_client
+
     def test_register_success(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         f = _make_accounts_file(tmp_path, {"active": None, "accounts": {}})
         args = argparse.Namespace(
             name="NewBot",
-            email="owner@example.com",
+            provider="google",
             runtime="claude-code",
             model_provider="anthropic",
             base_url="https://scutl.org",
             force=False,
+            timeout=300,
         )
-        mock_reg = Registration(
-            agent_id="agent_new", display_name="NewBot", api_key="sk_fresh"
-        )
-        mock_client = AsyncMock()
-        mock_client.register.return_value = mock_reg
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client = self._mock_client_for_register()
 
         with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
              patch.object(scutl_agent, "ACCOUNTS_DIR", tmp_path), \
              patch("scutl.ScutlClient", return_value=mock_client):
             asyncio.run(scutl_agent.cmd_register(args))
 
-        out = json.loads(capsys.readouterr().out)
-        assert out["agent_id"] == "agent_new"
-        assert out["api_key"] == "sk_fresh"
+        # cmd_register outputs twice: awaiting status + final result
+        raw = capsys.readouterr().out.strip()
+        decoder = json.JSONDecoder()
+        # Skip the first JSON object (awaiting_authorization)
+        _, idx = decoder.raw_decode(raw)
+        final_out = decoder.raw_decode(raw, idx=idx + 1)[0]
+        assert final_out["agent_id"] == "agent_new"
+        assert final_out["api_key"] == "sk_fresh"
 
         saved = json.loads(f.read_text())
         assert saved["active"] == "agent_new"
@@ -313,11 +334,12 @@ class TestCmdRegister:
         f = _make_accounts_file(tmp_path, {"active": "agent_0", "accounts": accounts})
         args = argparse.Namespace(
             name="OneMore",
-            email="a@b.com",
+            provider="github",
             runtime=None,
             model_provider=None,
             base_url="https://scutl.org",
             force=False,
+            timeout=300,
         )
         with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
              pytest.raises(SystemExit):
@@ -330,27 +352,27 @@ class TestCmdRegister:
         f = _make_accounts_file(tmp_path, {"active": "agent_0", "accounts": accounts})
         args = argparse.Namespace(
             name="ForcedBot",
-            email="a@b.com",
+            provider="github",
             runtime=None,
             model_provider=None,
             base_url="https://scutl.org",
             force=True,
+            timeout=300,
         )
-        mock_reg = Registration(
+        mock_client = self._mock_client_for_register(
             agent_id="agent_forced", display_name="ForcedBot", api_key="sk_forced"
         )
-        mock_client = AsyncMock()
-        mock_client.register.return_value = mock_reg
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
 
         with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
              patch.object(scutl_agent, "ACCOUNTS_DIR", tmp_path), \
              patch("scutl.ScutlClient", return_value=mock_client):
             asyncio.run(scutl_agent.cmd_register(args))
 
-        out = json.loads(capsys.readouterr().out)
-        assert out["agent_id"] == "agent_forced"
+        raw = capsys.readouterr().out.strip()
+        decoder = json.JSONDecoder()
+        _, idx = decoder.raw_decode(raw)
+        final_out = decoder.raw_decode(raw, idx=idx + 1)[0]
+        assert final_out["agent_id"] == "agent_forced"
 
 
 class TestCmdPost:

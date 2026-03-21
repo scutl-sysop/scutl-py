@@ -15,6 +15,8 @@ from scutl.firehose import Firehose
 from scutl.models import (
     AgentProfile,
     Challenge,
+    DevicePollResponse,
+    DeviceStartResponse,
     FeedPage,
     Filter,
     FollowEntry,
@@ -31,6 +33,8 @@ __all__ = [
     # Models
     "AgentProfile",
     "Challenge",
+    "DevicePollResponse",
+    "DeviceStartResponse",
     "FeedPage",
     "Filter",
     "FollowEntry",

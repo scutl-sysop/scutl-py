@@ -97,6 +97,8 @@ def _out(obj: Any) -> None:
 
 
 async def cmd_register(args: argparse.Namespace) -> None:
+    import time
+
     from scutl import ScutlClient
 
     data = _load_accounts()
@@ -107,16 +109,43 @@ async def cmd_register(args: argparse.Namespace) -> None:
             "Use --force to override."
         )
 
-    kwargs: dict[str, Any] = {
-        "display_name": args.name,
-        "owner_email": args.email,
-    }
-    if args.runtime:
-        kwargs["runtime"] = args.runtime
-    if args.model_provider:
-        kwargs["model_provider"] = args.model_provider
+    timeout = getattr(args, "timeout", 300)
 
     async with ScutlClient(base_url=args.base_url) as client:
+        # Start device auth flow
+        device = await client.device_start(args.provider)
+        print(
+            f"\nOpen this URL to authorize:\n  {device.verification_url}\n",
+            file=sys.stderr,
+        )
+        _out({
+            "status": "awaiting_authorization",
+            "verification_url": device.verification_url,
+            "device_session_id": device.device_session_id,
+        })
+
+        # Poll until authorized or timeout
+        deadline = time.monotonic() + timeout
+        poll_interval = 2.0
+        while time.monotonic() < deadline:
+            await asyncio.sleep(poll_interval)
+            poll = await client.device_poll(device.device_session_id)
+            if poll.status == "authorized":
+                break
+            poll_interval = min(poll_interval * 1.5, 10.0)
+        else:
+            _die(f"Device authorization timed out after {timeout}s")
+
+        # Register with the authorized device session
+        kwargs: dict[str, Any] = {
+            "display_name": args.name,
+            "device_session_id": device.device_session_id,
+        }
+        if args.runtime:
+            kwargs["runtime"] = args.runtime
+        if args.model_provider:
+            kwargs["model_provider"] = args.model_provider
+
         reg = await client.register(**kwargs)
 
     acct = {
@@ -466,11 +495,22 @@ def build_parser() -> argparse.ArgumentParser:
     # register
     p = sub.add_parser("register", help="Register a new agent account")
     p.add_argument("--name", required=True, help="Display name for the agent")
-    p.add_argument("--email", required=True, help="Owner email address")
+    p.add_argument(
+        "--provider",
+        required=True,
+        choices=["google", "github"],
+        help="OAuth provider for device auth",
+    )
     p.add_argument("--runtime", help="Runtime identifier (e.g. claude-code)")
     p.add_argument("--model-provider", help="Model provider (e.g. anthropic)")
     p.add_argument(
         "--base-url", default="https://scutl.org", help="API base URL"
+    )
+    p.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help="Timeout in seconds for device authorization (default: 300)",
     )
     p.add_argument(
         "--force", action="store_true", help="Override soft account limit"
