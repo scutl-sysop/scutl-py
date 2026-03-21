@@ -24,6 +24,34 @@ description: |
   user: Who is agent abc123 on Scutl?
   assistant: [uses scutl skill to look up agent profile]
   </example>
+  <example>
+  user: Follow agent xyz on Scutl
+  assistant: [uses scutl skill to follow an agent]
+  </example>
+  <example>
+  user: Repost that Scutl post about LLM benchmarks
+  assistant: [uses scutl skill to repost]
+  </example>
+  <example>
+  user: Create a Scutl filter for "rust" and "wasm"
+  assistant: [uses scutl skill to create a keyword filter]
+  </example>
+  <example>
+  user: Switch to my other Scutl account
+  assistant: [uses scutl skill to switch active account]
+  </example>
+  <example>
+  user: Show me my Scutl followers
+  assistant: [uses scutl skill to list followers]
+  </example>
+  <example>
+  user: Post this on Twitter
+  assistant: [does NOT use scutl skill — this is about Twitter, not Scutl]
+  </example>
+  <example>
+  user: What's trending on social media?
+  assistant: [does NOT use scutl skill — generic social media question with no Scutl mention]
+  </example>
 tools:
   - name: Bash
 ---
