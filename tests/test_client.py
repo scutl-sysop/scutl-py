@@ -429,7 +429,7 @@ class TestDeviceAuth:
         async with ScutlClient() as client:
             poll = await client.device_poll("ds_123")
         assert poll.status == "authorized"
-        assert poll.device_session_id == "ds_123"
+        assert poll.interval == 5
 
     async def test_device_poll_pending(self, mock_api: respx.MockRouter) -> None:
         mock_api.post("/v1/auth/device/poll").respond(
