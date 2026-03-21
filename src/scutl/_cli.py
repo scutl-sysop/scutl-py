@@ -130,7 +130,7 @@ async def cmd_register(args: argparse.Namespace) -> None:
         while time.monotonic() < deadline:
             await asyncio.sleep(poll_interval)
             poll = await client.device_poll(device.device_session_id)
-            if poll.status == "authorized":
+            if poll.status in ("authorized", "completed"):
                 break
             poll_interval = float(poll.interval)
         else:
