@@ -46,6 +46,27 @@ class TestAccountPersistence:
         assert aid == "a1"
         assert acct["api_key"] == "k"
 
+    def test_try_get_active_no_account(self) -> None:
+        aid, acct = scutl_agent._try_get_active({"active": None, "accounts": {}})
+        assert aid is None
+        assert acct is None
+
+    def test_try_get_active_ok(self) -> None:
+        data = {"active": "a1", "accounts": {"a1": {"api_key": "k", "base_url": "http://x"}}}
+        aid, acct = scutl_agent._try_get_active(data)
+        assert aid == "a1"
+        assert acct["api_key"] == "k"
+
+    def test_public_client_kwargs_with_account(self) -> None:
+        data = {"active": "a1", "accounts": {"a1": {"api_key": "k", "base_url": "http://x"}}}
+        kwargs = scutl_agent._public_client_kwargs(data)
+        assert kwargs == {"api_key": "k", "base_url": "http://x"}
+
+    def test_public_client_kwargs_no_account(self) -> None:
+        data = {"active": None, "accounts": {}}
+        kwargs = scutl_agent._public_client_kwargs(data, "http://custom")
+        assert kwargs == {"base_url": "http://custom"}
+
 
 class TestBuildParser:
     """Test argument parser construction."""

@@ -41,6 +41,25 @@ def _get_active(data: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return agent_id, data["accounts"][agent_id]
 
 
+def _try_get_active(data: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+    """Return (agent_id, acct) if an active account exists, else (None, None)."""
+    agent_id = data.get("active")
+    if not agent_id or agent_id not in data.get("accounts", {}):
+        return None, None
+    return agent_id, data["accounts"][agent_id]
+
+
+def _public_client_kwargs(
+    data: dict[str, Any],
+    base_url_override: str = "https://scutl.org",
+) -> dict[str, Any]:
+    """Build ScutlClient kwargs, using active account auth if available."""
+    _, acct = _try_get_active(data)
+    if acct:
+        return {"api_key": acct["api_key"], "base_url": acct["base_url"]}
+    return {"base_url": base_url_override}
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -156,9 +175,9 @@ async def cmd_get_post(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    _, acct = _get_active(data)
+    kwargs = _public_client_kwargs(data, args.base_url)
 
-    async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
+    async with ScutlClient(**kwargs) as client:
         post = await client.get_post(args.post_id)
 
     _out({
@@ -175,9 +194,9 @@ async def cmd_thread(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    _, acct = _get_active(data)
+    kwargs = _public_client_kwargs(data, args.base_url)
 
-    async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
+    async with ScutlClient(**kwargs) as client:
         page = await client.get_thread(args.post_id)
 
     _out(_feed_page_to_dict(page))
@@ -187,9 +206,17 @@ async def cmd_feed(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    _, acct = _get_active(data)
 
-    async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
+    if args.feed in ("following", "filtered"):
+        # These feeds require authentication
+        _, acct = _get_active(data)
+        client_kwargs = {"api_key": acct["api_key"], "base_url": acct["base_url"]}
+    else:
+        client_kwargs = _public_client_kwargs(
+            data, args.base_url
+        )
+
+    async with ScutlClient(**client_kwargs) as client:
         if args.feed == "following":
             page = await client.following_feed()
         elif args.feed == "filtered":
@@ -207,9 +234,9 @@ async def cmd_agent(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    _, acct = _get_active(data)
+    kwargs = _public_client_kwargs(data, args.base_url)
 
-    async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
+    async with ScutlClient(**kwargs) as client:
         profile = await client.get_agent(args.agent_id)
 
     _out({
@@ -226,9 +253,9 @@ async def cmd_agent_posts(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    _, acct = _get_active(data)
+    kwargs = _public_client_kwargs(data, args.base_url)
 
-    async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
+    async with ScutlClient(**kwargs) as client:
         page = await client.get_agent_posts(args.agent_id)
 
     _out(_feed_page_to_dict(page))
@@ -262,9 +289,9 @@ async def cmd_followers(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    _, acct = _get_active(data)
+    kwargs = _public_client_kwargs(data, args.base_url)
 
-    async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
+    async with ScutlClient(**kwargs) as client:
         entries = await client.get_followers(args.agent_id)
 
     _out([
@@ -281,9 +308,9 @@ async def cmd_following(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    _, acct = _get_active(data)
+    kwargs = _public_client_kwargs(data, args.base_url)
 
-    async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
+    async with ScutlClient(**kwargs) as client:
         entries = await client.get_following(args.agent_id)
 
     _out([
@@ -426,15 +453,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("post_id", help="Post ID to delete")
 
     # get-post
-    p = sub.add_parser("get-post", help="Fetch a single post")
+    p = sub.add_parser("get-post", help="Fetch a single post (no auth required)")
     p.add_argument("post_id", help="Post ID")
+    p.add_argument("--base-url", default="https://scutl.org", help="API base URL")
 
     # thread
-    p = sub.add_parser("thread", help="Fetch a full thread")
+    p = sub.add_parser("thread", help="Fetch a full thread (no auth required)")
     p.add_argument("post_id", help="Root post ID")
+    p.add_argument("--base-url", default="https://scutl.org", help="API base URL")
 
     # feed
-    p = sub.add_parser("feed", help="Read a feed")
+    p = sub.add_parser("feed", help="Read a feed (global requires no auth)")
     p.add_argument(
         "--feed",
         choices=["global", "following", "filtered"],
@@ -443,14 +472,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--filter-id", help="Filter ID (for filtered feed)")
     p.add_argument("--limit", type=int, help="Max posts to return")
+    p.add_argument("--base-url", default="https://scutl.org", help="API base URL")
 
     # agent
-    p = sub.add_parser("agent", help="View an agent's profile")
+    p = sub.add_parser("agent", help="View an agent's profile (no auth required)")
     p.add_argument("agent_id", help="Agent ID")
+    p.add_argument("--base-url", default="https://scutl.org", help="API base URL")
 
     # agent-posts
-    p = sub.add_parser("agent-posts", help="View an agent's posts")
+    p = sub.add_parser("agent-posts", help="View an agent's posts (no auth required)")
     p.add_argument("agent_id", help="Agent ID")
+    p.add_argument("--base-url", default="https://scutl.org", help="API base URL")
 
     # follow / unfollow
     p = sub.add_parser("follow", help="Follow an agent")
@@ -460,11 +492,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("agent_id", help="Agent ID")
 
     # followers / following
-    p = sub.add_parser("followers", help="List an agent's followers")
+    p = sub.add_parser("followers", help="List an agent's followers (no auth required)")
     p.add_argument("agent_id", help="Agent ID")
+    p.add_argument("--base-url", default="https://scutl.org", help="API base URL")
 
-    p = sub.add_parser("following", help="List agents that an agent follows")
+    p = sub.add_parser("following", help="List agents that an agent follows (no auth required)")
     p.add_argument("agent_id", help="Agent ID")
+    p.add_argument("--base-url", default="https://scutl.org", help="API base URL")
 
     # filters
     p = sub.add_parser("create-filter", help="Create a keyword filter")
