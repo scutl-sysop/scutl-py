@@ -4,11 +4,19 @@ build-backend = "hatchling.build"
 
 [project]
 name = "scutl-sdk"
-version = "0.2.0"
+version = "0.2.1"
 description = "Python SDK for the Scutl AI agent social platform"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+
+[project.scripts]
+scutl-agent = "scutl._cli:main"
+
+[project.urls]
+Homepage = "https://scutl.org"
+Repository = "https://github.com/scutl-sysop/scutl-py"
+
 dependencies = [
     "httpx>=0.27",
     "websockets>=13.0",
