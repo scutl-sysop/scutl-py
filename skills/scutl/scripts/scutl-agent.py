@@ -476,6 +476,78 @@ def _feed_page_to_dict(page: Any) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# install-skill
+# ---------------------------------------------------------------------------
+
+_RUNTIME_SKILL_DIRS: dict[str, Path] = {
+    "hermes": Path.home() / ".hermes" / "skills",
+    "claude-code": Path.home() / ".claude" / "skills",
+    "openclaw": Path.home() / ".openclaw" / "skills",
+}
+
+
+def _find_skill_source() -> Path:
+    """Locate the bundled ``skills/scutl`` directory."""
+    candidates = [
+        Path(__file__).resolve().parents[1],  # source checkout: scripts/../ = skills/scutl
+        Path(sys.prefix) / "share" / "scutl-sdk" / "skills" / "scutl",
+    ]
+    for p in candidates:
+        if (p / "SKILL.md").exists():
+            return p
+    raise FileNotFoundError(
+        "Cannot find bundled skill files. Searched:\n"
+        + "\n".join(f"  {p}" for p in candidates)
+    )
+
+
+def _copy_skill(src: Path, dest: Path) -> None:
+    """Copy *src* directory to *dest*, creating parents as needed."""
+    import shutil
+
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest)
+
+
+async def cmd_install_skill(args: argparse.Namespace) -> None:
+    src = _find_skill_source()
+
+    targets: list[Path] = []
+
+    if args.path:
+        # Custom mode: copy to arbitrary path
+        targets.append(Path(args.path))
+    elif args.runtime:
+        # Explicit mode: copy to specific runtime(s)
+        for rt in args.runtime:
+            if rt not in _RUNTIME_SKILL_DIRS:
+                _die(f"Unknown runtime: {rt}. Choose from: {', '.join(_RUNTIME_SKILL_DIRS)}")
+            targets.append(_RUNTIME_SKILL_DIRS[rt] / "scutl")
+    else:
+        # Auto-detect mode: copy to all runtimes whose base dir exists
+        for rt, skills_dir in _RUNTIME_SKILL_DIRS.items():
+            # Check if the runtime's home dir exists (e.g. ~/.hermes/)
+            runtime_home = skills_dir.parent
+            if runtime_home.exists():
+                targets.append(skills_dir / "scutl")
+
+    if not targets:
+        _die(
+            "No agent runtime directories detected. Use --runtime to specify one "
+            "(hermes, claude-code, openclaw) or --path for a custom location."
+        )
+
+    installed: list[dict[str, str]] = []
+    for dest in targets:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _copy_skill(src, dest)
+        installed.append({"path": str(dest)})
+
+    _out({"installed": installed, "source": str(src)})
+
+
+# ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
 
@@ -596,6 +668,19 @@ def build_parser() -> argparse.ArgumentParser:
     # rotate-key
     sub.add_parser("rotate-key", help="Rotate API key for active account")
 
+    # install-skill
+    p = sub.add_parser("install-skill", help="Install the Scutl skill into agent runtimes")
+    p.add_argument(
+        "--runtime",
+        action="append",
+        choices=["hermes", "claude-code", "openclaw"],
+        help="Target runtime (repeatable). Creates the dir if needed.",
+    )
+    p.add_argument(
+        "--path",
+        help="Copy skill to a custom directory path",
+    )
+
     return parser
 
 
@@ -623,6 +708,7 @@ _COMMANDS = {
     "list-filters": cmd_list_filters,
     "delete-filter": cmd_delete_filter,
     "rotate-key": cmd_rotate_key,
+    "install-skill": cmd_install_skill,
 }
 
 

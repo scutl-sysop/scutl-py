@@ -851,3 +851,66 @@ class TestCmdThread:
 
         out = json.loads(capsys.readouterr().out)
         assert len(out["posts"]) == 2
+
+
+class TestInstallSkill:
+    """Tests for the install-skill subcommand."""
+
+    def test_install_to_custom_path(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        dest = tmp_path / "my-skills"
+        args = argparse.Namespace(runtime=None, path=str(dest))
+        asyncio.run(scutl_agent.cmd_install_skill(args))
+        out = json.loads(capsys.readouterr().out)
+        assert len(out["installed"]) == 1
+        assert out["installed"][0]["path"] == str(dest)
+        assert (dest / "SKILL.md").exists()
+        assert (dest / "scripts" / "scutl-agent.py").exists()
+
+    def test_install_explicit_runtime(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        fake_dirs = {
+            "hermes": tmp_path / ".hermes" / "skills",
+            "claude-code": tmp_path / ".claude" / "skills",
+            "openclaw": tmp_path / ".openclaw" / "skills",
+        }
+        args = argparse.Namespace(runtime=["claude-code"], path=None)
+        with patch.dict(scutl_agent._RUNTIME_SKILL_DIRS, fake_dirs):
+            asyncio.run(scutl_agent.cmd_install_skill(args))
+        out = json.loads(capsys.readouterr().out)
+        assert len(out["installed"]) == 1
+        dest = Path(out["installed"][0]["path"])
+        assert dest == fake_dirs["claude-code"] / "scutl"
+        assert (dest / "SKILL.md").exists()
+
+    def test_install_autodetect(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+        # Create fake runtime home dirs so auto-detect finds them
+        (tmp_path / ".hermes").mkdir()
+        (tmp_path / ".claude").mkdir()
+        fake_dirs = {
+            "hermes": tmp_path / ".hermes" / "skills",
+            "claude-code": tmp_path / ".claude" / "skills",
+            "openclaw": tmp_path / ".openclaw" / "skills",  # not created, should be skipped
+        }
+        args = argparse.Namespace(runtime=None, path=None)
+        with patch.dict(scutl_agent._RUNTIME_SKILL_DIRS, fake_dirs):
+            asyncio.run(scutl_agent.cmd_install_skill(args))
+        out = json.loads(capsys.readouterr().out)
+        # Only hermes and claude-code detected (openclaw home doesn't exist)
+        assert len(out["installed"]) == 2
+        paths = {i["path"] for i in out["installed"]}
+        assert str(fake_dirs["hermes"] / "scutl") in paths
+        assert str(fake_dirs["claude-code"] / "scutl") in paths
+
+    def test_install_autodetect_nothing_found(self, tmp_path: Path) -> None:
+        fake_dirs = {
+            "hermes": tmp_path / ".hermes" / "skills",
+            "claude-code": tmp_path / ".claude" / "skills",
+            "openclaw": tmp_path / ".openclaw" / "skills",
+        }
+        args = argparse.Namespace(runtime=None, path=None)
+        with patch.dict(scutl_agent._RUNTIME_SKILL_DIRS, fake_dirs), \
+             pytest.raises(SystemExit):
+            asyncio.run(scutl_agent.cmd_install_skill(args))

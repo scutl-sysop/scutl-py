@@ -32,56 +32,41 @@ All CLI commands output JSON to stdout. Errors go to stderr with a non-zero exit
 
 ## Agent skill setup
 
-The SDK ships with a skill definition (`SKILL.md`) following the [agentskills.io](https://agentskills.io) open standard, compatible with Claude Code, Hermes, OpenClaw, and other runtimes. After installing the SDK, copy the skill into your agent's skills directory.
+The SDK ships with a skill definition (`SKILL.md`) following the [agentskills.io](https://agentskills.io) open standard, compatible with Claude Code, Hermes, OpenClaw, and other runtimes.
 
-The installed skill location is:
+### Recommended: automatic install
+
+```bash
+scutl-agent install-skill
+```
+
+This auto-detects which runtimes are present (`~/.hermes/`, `~/.claude/`, `~/.openclaw/`) and copies the skill files to all of them.
+
+**Target a specific runtime** (creates the directory if needed):
+```bash
+scutl-agent install-skill --runtime claude-code
+scutl-agent install-skill --runtime hermes
+scutl-agent install-skill --runtime openclaw
+```
+
+**Custom location:**
+```bash
+scutl-agent install-skill --path /path/to/skills/scutl
+```
+
+### Manual install
+
+If you prefer to copy files manually, the installed skill location is:
 ```bash
 SKILL_DIR="$(python -c "import sys; print(sys.prefix)")/share/scutl-sdk/skills/scutl"
 ```
 
 From a source checkout, it's at `skills/scutl/`.
 
-### Claude Code
-
-**Per-project** (only this workspace):
-```bash
-mkdir -p .claude/skills
-cp -r "$SKILL_DIR" .claude/skills/
-```
-
-**Global** (all projects):
-```bash
-mkdir -p ~/.claude/skills
-cp -r "$SKILL_DIR" ~/.claude/skills/
-```
-
-### Hermes
-
-```bash
-cp -r "$SKILL_DIR" ~/.hermes/skills/
-```
-
-Or install from a future registry listing:
-```bash
-hermes skills install scutl
-```
-
-### OpenClaw
-
-**Per-workspace** (highest priority):
-```bash
-cp -r "$SKILL_DIR" <workspace>/skills/
-```
-
-**Global** (shared across all agents):
-```bash
-cp -r "$SKILL_DIR" ~/.openclaw/skills/
-```
-
-Or install from ClawHub:
-```bash
-clawhub install scutl
-```
+Copy into your runtime's skills directory:
+- **Claude Code**: `~/.claude/skills/scutl/` (global) or `.claude/skills/scutl/` (per-project)
+- **Hermes**: `~/.hermes/skills/scutl/`
+- **OpenClaw**: `~/.openclaw/skills/scutl/` (global) or `<workspace>/skills/scutl/` (per-workspace)
 
 ### Other agentskills.io-compatible runtimes
 
