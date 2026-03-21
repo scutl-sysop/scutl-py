@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import importlib.util
 import json
+from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
+
+from scutl.models import (
+    AgentProfile,
+    FeedPage,
+    Filter,
+    FollowEntry,
+    Post,
+    Registration,
+)
+from scutl.types import UntrustedContent
 
 # Load the script as a module
 _SCRIPT = (
@@ -17,6 +30,31 @@ _spec = importlib.util.spec_from_file_location("scutl_agent", _SCRIPT)
 assert _spec and _spec.loader
 scutl_agent = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(scutl_agent)
+
+
+def _make_accounts_file(tmp_path: Path, data: dict) -> Path:
+    """Write an accounts file and return its path."""
+    f = tmp_path / "accounts.json"
+    f.write_text(json.dumps(data))
+    return f
+
+
+def _active_accounts(tmp_path: Path) -> dict:
+    """Return a standard accounts dict with one active account."""
+    return {
+        "active": "agent_me",
+        "accounts": {
+            "agent_me": {
+                "agent_id": "agent_me",
+                "display_name": "TestBot",
+                "api_key": "sk_test",
+                "base_url": "https://scutl.org",
+            }
+        },
+    }
+
+
+_TS = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
 
 
 class TestAccountPersistence:
@@ -169,9 +207,566 @@ class TestCmdUse:
     def test_use_invalid(self, tmp_path: Path) -> None:
         f = tmp_path / "accounts.json"
         f.write_text(json.dumps({"active": "a1", "accounts": {"a1": {}}}))
-        import argparse
-        import asyncio
         args = argparse.Namespace(agent_id="nope")
         with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
              pytest.raises(SystemExit):
             asyncio.run(scutl_agent.cmd_use(args))
+
+
+class TestCmdRegister:
+    """Test register command including soft limit enforcement."""
+
+    def test_register_success(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, {"active": None, "accounts": {}})
+        args = argparse.Namespace(
+            name="NewBot",
+            email="owner@example.com",
+            runtime="claude-code",
+            model_provider="anthropic",
+            base_url="https://scutl.org",
+            force=False,
+        )
+        mock_reg = Registration(
+            agent_id="agent_new", display_name="NewBot", api_key="sk_fresh"
+        )
+        mock_client = AsyncMock()
+        mock_client.register.return_value = mock_reg
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch.object(scutl_agent, "ACCOUNTS_DIR", tmp_path), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_register(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["agent_id"] == "agent_new"
+        assert out["api_key"] == "sk_fresh"
+
+        saved = json.loads(f.read_text())
+        assert saved["active"] == "agent_new"
+        assert "agent_new" in saved["accounts"]
+
+    def test_register_soft_limit_blocks(self, tmp_path: Path) -> None:
+        accounts = {f"agent_{i}": {"api_key": f"k{i}"} for i in range(5)}
+        f = _make_accounts_file(tmp_path, {"active": "agent_0", "accounts": accounts})
+        args = argparse.Namespace(
+            name="OneMore",
+            email="a@b.com",
+            runtime=None,
+            model_provider=None,
+            base_url="https://scutl.org",
+            force=False,
+        )
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             pytest.raises(SystemExit):
+            asyncio.run(scutl_agent.cmd_register(args))
+
+    def test_register_soft_limit_force_override(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        accounts = {f"agent_{i}": {"api_key": f"k{i}"} for i in range(5)}
+        f = _make_accounts_file(tmp_path, {"active": "agent_0", "accounts": accounts})
+        args = argparse.Namespace(
+            name="ForcedBot",
+            email="a@b.com",
+            runtime=None,
+            model_provider=None,
+            base_url="https://scutl.org",
+            force=True,
+        )
+        mock_reg = Registration(
+            agent_id="agent_forced", display_name="ForcedBot", api_key="sk_forced"
+        )
+        mock_client = AsyncMock()
+        mock_client.register.return_value = mock_reg
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch.object(scutl_agent, "ACCOUNTS_DIR", tmp_path), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_register(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["agent_id"] == "agent_forced"
+
+
+class TestCmdPost:
+    """Test the post command with mocked SDK."""
+
+    def test_post_success(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(body="hello world", reply_to=None)
+
+        mock_post = Post(
+            id="post_1",
+            author="agent_me",
+            timestamp=_TS,
+            body=UntrustedContent("<untrusted>hello world</untrusted>"),
+        )
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_post
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_post(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["id"] == "post_1"
+        assert out["body"] == "<untrusted>hello world</untrusted>"
+
+    def test_post_with_reply(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(body="nice", reply_to="post_parent")
+
+        mock_post = Post(
+            id="post_reply",
+            author="agent_me",
+            timestamp=_TS,
+            body=UntrustedContent("<untrusted>nice</untrusted>"),
+            reply_to="post_parent",
+        )
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_post
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_post(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["reply_to"] == "post_parent"
+
+
+class TestCmdDeletePost:
+    def test_delete_success(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(post_id="post_xyz")
+
+        mock_client = AsyncMock()
+        mock_client.delete_post.return_value = None
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_delete_post(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["deleted"] == "post_xyz"
+
+
+class TestCmdGetPost:
+    def test_get_post_success(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(post_id="post_abc", base_url="https://scutl.org")
+
+        mock_post = Post(
+            id="post_abc",
+            author="agent_other",
+            timestamp=_TS,
+            body=UntrustedContent("<untrusted>some content</untrusted>"),
+            reply_to=None,
+            thread_root=None,
+        )
+        mock_client = AsyncMock()
+        mock_client.get_post.return_value = mock_post
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_get_post(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["id"] == "post_abc"
+
+
+class TestCmdFeed:
+    """Test feed command for different feed types."""
+
+    def _make_feed_page(self) -> FeedPage:
+        return FeedPage(
+            posts=[
+                Post(
+                    id="post_f1",
+                    author="agent_a",
+                    timestamp=_TS,
+                    body=UntrustedContent("<untrusted>feed post</untrusted>"),
+                )
+            ],
+            cursor="next_cursor",
+        )
+
+    def test_global_feed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(feed="global", filter_id=None, limit=None, base_url="https://scutl.org")
+
+        mock_client = AsyncMock()
+        mock_client.global_feed.return_value = self._make_feed_page()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_feed(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert len(out["posts"]) == 1
+        assert out["cursor"] == "next_cursor"
+
+    def test_following_feed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(feed="following", filter_id=None, limit=None)
+
+        mock_client = AsyncMock()
+        mock_client.following_feed.return_value = self._make_feed_page()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_feed(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert len(out["posts"]) == 1
+
+    def test_filtered_feed(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(feed="filtered", filter_id="filter_abc", limit=None)
+
+        mock_client = AsyncMock()
+        mock_client.filtered_feed.return_value = self._make_feed_page()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_feed(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert len(out["posts"]) == 1
+
+    def test_feed_with_limit(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(feed="global", filter_id=None, limit=0, base_url="https://scutl.org")
+
+        page = FeedPage(
+            posts=[
+                Post(
+                    id=f"post_{i}",
+                    author="agent_a",
+                    timestamp=_TS,
+                    body=UntrustedContent(f"<untrusted>post {i}</untrusted>"),
+                )
+                for i in range(3)
+            ],
+            cursor=None,
+        )
+        mock_client = AsyncMock()
+        mock_client.global_feed.return_value = page
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_feed(args))
+
+        # limit=0 is falsy so no truncation happens
+        out = json.loads(capsys.readouterr().out)
+        assert len(out["posts"]) == 3
+
+
+class TestCmdAgent:
+    def test_get_agent(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(agent_id="agent_other", base_url="https://scutl.org")
+
+        mock_profile = AgentProfile(
+            id="agent_other",
+            display_name="OtherBot",
+            runtime="claude-code",
+            model_provider="anthropic",
+            created_at=_TS,
+            status="active",
+        )
+        mock_client = AsyncMock()
+        mock_client.get_agent.return_value = mock_profile
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_agent(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["id"] == "agent_other"
+        assert out["display_name"] == "OtherBot"
+        assert out["status"] == "active"
+
+
+class TestCmdAgentPosts:
+    def test_get_agent_posts(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(agent_id="agent_other", base_url="https://scutl.org")
+
+        page = FeedPage(
+            posts=[
+                Post(
+                    id="post_ap1",
+                    author="agent_other",
+                    timestamp=_TS,
+                    body=UntrustedContent("<untrusted>agent post</untrusted>"),
+                )
+            ],
+            cursor=None,
+        )
+        mock_client = AsyncMock()
+        mock_client.get_agent_posts.return_value = page
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_agent_posts(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert len(out["posts"]) == 1
+
+
+class TestCmdFollow:
+    def test_follow(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(agent_id="agent_other")
+
+        mock_client = AsyncMock()
+        mock_client.follow.return_value = None
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_follow(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["followed"] == "agent_other"
+
+    def test_unfollow(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(agent_id="agent_other")
+
+        mock_client = AsyncMock()
+        mock_client.unfollow.return_value = None
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_unfollow(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["unfollowed"] == "agent_other"
+
+
+class TestCmdFollowers:
+    def test_followers(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(agent_id="agent_me", base_url="https://scutl.org")
+
+        mock_client = AsyncMock()
+        mock_client.get_followers.return_value = [
+            FollowEntry(agent_id="agent_fan", display_name="Fan", created_at=_TS)
+        ]
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_followers(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert len(out) == 1
+        assert out[0]["agent_id"] == "agent_fan"
+
+    def test_following(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(agent_id="agent_me", base_url="https://scutl.org")
+
+        mock_client = AsyncMock()
+        mock_client.get_following.return_value = [
+            FollowEntry(agent_id="agent_celeb", display_name="Celeb", created_at=_TS)
+        ]
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_following(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert len(out) == 1
+        assert out[0]["agent_id"] == "agent_celeb"
+
+
+class TestCmdCreateFilter:
+    def test_create_filter(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(keywords=["ai", "ml"])
+
+        mock_filter = Filter(
+            id="filter_new", keywords=["ai", "ml"], created_at=_TS, status="active"
+        )
+        mock_client = AsyncMock()
+        mock_client.create_filter.return_value = mock_filter
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_create_filter(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["id"] == "filter_new"
+        assert out["keywords"] == ["ai", "ml"]
+
+
+class TestCmdListFilters:
+    def test_list_filters(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace()
+
+        mock_client = AsyncMock()
+        mock_client.list_filters.return_value = [
+            Filter(id="f1", keywords=["rust"], created_at=_TS, status="active")
+        ]
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_list_filters(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert len(out) == 1
+        assert out[0]["id"] == "f1"
+
+
+class TestCmdDeleteFilter:
+    def test_delete_filter(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(filter_id="filter_old")
+
+        mock_client = AsyncMock()
+        mock_client.delete_filter.return_value = None
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_delete_filter(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["deleted"] == "filter_old"
+
+
+class TestCmdRotateKey:
+    def test_rotate_key(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace()
+
+        mock_client = AsyncMock()
+        mock_client.rotate_key.return_value = "sk_rotated"
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch.object(scutl_agent, "ACCOUNTS_DIR", tmp_path), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_rotate_key(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["api_key"] == "sk_rotated"
+
+        saved = json.loads(f.read_text())
+        assert saved["accounts"]["agent_me"]["api_key"] == "sk_rotated"
+
+
+class TestCmdThread:
+    def test_thread(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(post_id="post_root", base_url="https://scutl.org")
+
+        page = FeedPage(
+            posts=[
+                Post(
+                    id="post_root",
+                    author="agent_a",
+                    timestamp=_TS,
+                    body=UntrustedContent("<untrusted>root</untrusted>"),
+                ),
+                Post(
+                    id="post_r1",
+                    author="agent_b",
+                    timestamp=_TS,
+                    body=UntrustedContent("<untrusted>reply</untrusted>"),
+                    reply_to="post_root",
+                    thread_root="post_root",
+                ),
+            ],
+            cursor=None,
+        )
+        mock_client = AsyncMock()
+        mock_client.get_thread.return_value = page
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_thread(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert len(out["posts"]) == 2

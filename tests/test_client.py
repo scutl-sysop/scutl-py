@@ -6,8 +6,13 @@ import respx
 from scutl.client import ScutlClient
 from scutl.exceptions import (
     AuthenticationError,
+    ChallengeExpiredError,
+    ConflictError,
+    ForbiddenError,
     NotFoundError,
     RateLimitError,
+    ScutlError,
+    ValidationError,
 )
 
 BASE = "https://scutl.org"
@@ -114,6 +119,56 @@ class TestPosting:
         assert rp.repost_of == "post_orig"
 
 
+class TestGetPost:
+    async def test_get_single_post(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/posts/post_xyz").respond(
+            200,
+            json={
+                "id": "post_xyz",
+                "author": "agent_a",
+                "timestamp": "2026-03-20T12:00:00Z",
+                "body": "<untrusted>fetched post</untrusted>",
+                "reply_to": None,
+                "thread_root": None,
+            },
+        )
+        async with ScutlClient() as client:
+            post = await client.get_post("post_xyz")
+        assert post.id == "post_xyz"
+        assert post.body.to_string_unsafe() == "fetched post"
+
+    async def test_get_thread(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/posts/post_root/thread").respond(
+            200,
+            json={
+                "posts": [
+                    {
+                        "id": "post_root",
+                        "author": "agent_a",
+                        "timestamp": "2026-03-20T12:00:00Z",
+                        "body": "<untrusted>root</untrusted>",
+                        "reply_to": None,
+                        "thread_root": None,
+                    },
+                    {
+                        "id": "post_reply",
+                        "author": "agent_b",
+                        "timestamp": "2026-03-20T12:05:00Z",
+                        "body": "<untrusted>reply</untrusted>",
+                        "reply_to": "post_root",
+                        "thread_root": "post_root",
+                    },
+                ],
+                "cursor": None,
+                "meta": {},
+            },
+        )
+        async with ScutlClient() as client:
+            page = await client.get_thread("post_root")
+        assert len(page.posts) == 2
+        assert page.posts[1].reply_to == "post_root"
+
+
 class TestFollows:
     async def test_follow(self, mock_api: respx.MockRouter) -> None:
         mock_api.post("/v1/agents/agent_other/follow").respond(
@@ -126,6 +181,22 @@ class TestFollows:
         mock_api.delete("/v1/agents/agent_other/follow").respond(204)
         async with ScutlClient(api_key="sk_test") as client:
             await client.unfollow("agent_other")
+
+    async def test_get_following(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/agents/agent_me/following").respond(
+            200,
+            json=[
+                {
+                    "agent_id": "agent_celeb",
+                    "display_name": "celeb_bot",
+                    "created_at": "2026-03-20T10:00:00Z",
+                }
+            ],
+        )
+        async with ScutlClient() as client:
+            following = await client.get_following("agent_me")
+        assert len(following) == 1
+        assert following[0].agent_id == "agent_celeb"
 
     async def test_get_followers(self, mock_api: respx.MockRouter) -> None:
         mock_api.get("/v1/agents/agent_me/followers").respond(
@@ -180,6 +251,260 @@ class TestKeyRotation:
         assert new_key == "sk_new_key_here"
 
 
+class TestFollowingFeed:
+    async def test_returns_feed_page(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/feed/following").respond(
+            200,
+            json={
+                "posts": [
+                    {
+                        "id": "post_f1",
+                        "author": "agent_friend",
+                        "timestamp": "2026-03-20T13:00:00Z",
+                        "body": "<untrusted>from a friend</untrusted>",
+                        "reply_to": None,
+                        "thread_root": None,
+                    }
+                ],
+                "cursor": "ts_follow1",
+                "meta": {},
+            },
+        )
+        async with ScutlClient(api_key="sk_test") as client:
+            page = await client.following_feed()
+        assert len(page.posts) == 1
+        assert page.cursor == "ts_follow1"
+
+    async def test_pagination(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/feed/following").respond(
+            200, json={"posts": [], "cursor": None, "meta": {}}
+        )
+        async with ScutlClient(api_key="sk_test") as client:
+            page = await client.following_feed(cursor="ts_old")
+        assert page.posts == []
+
+
+class TestFilteredFeed:
+    async def test_with_filter_id(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/feed/filtered/filter_abc").respond(
+            200,
+            json={
+                "posts": [
+                    {
+                        "id": "post_filt1",
+                        "author": "agent_x",
+                        "timestamp": "2026-03-20T14:00:00Z",
+                        "body": "<untrusted>matches filter</untrusted>",
+                        "reply_to": None,
+                        "thread_root": None,
+                    }
+                ],
+                "cursor": None,
+                "meta": {},
+            },
+        )
+        async with ScutlClient(api_key="sk_test") as client:
+            page = await client.filtered_feed("filter_abc")
+        assert len(page.posts) == 1
+
+    async def test_without_filter_id(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/feed/filtered").respond(
+            200, json={"posts": [], "cursor": None, "meta": {}}
+        )
+        async with ScutlClient(api_key="sk_test") as client:
+            page = await client.filtered_feed()
+        assert page.posts == []
+
+
+class TestAgents:
+    async def test_get_agent(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/agents/agent_abc").respond(
+            200,
+            json={
+                "id": "agent_abc",
+                "display_name": "TestBot",
+                "runtime": "claude-code",
+                "model_provider": "anthropic",
+                "created_at": "2026-03-20T10:00:00Z",
+                "status": "active",
+            },
+        )
+        async with ScutlClient() as client:
+            profile = await client.get_agent("agent_abc")
+        assert profile.id == "agent_abc"
+        assert profile.display_name == "TestBot"
+        assert profile.runtime == "claude-code"
+        assert profile.status == "active"
+
+    async def test_get_agent_posts(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/agents/agent_abc/posts").respond(
+            200,
+            json={
+                "posts": [
+                    {
+                        "id": "post_ap1",
+                        "author": "agent_abc",
+                        "timestamp": "2026-03-20T12:00:00Z",
+                        "body": "<untrusted>agent post</untrusted>",
+                        "reply_to": None,
+                        "thread_root": None,
+                    }
+                ],
+                "cursor": None,
+                "meta": {},
+            },
+        )
+        async with ScutlClient() as client:
+            page = await client.get_agent_posts("agent_abc")
+        assert len(page.posts) == 1
+        assert page.posts[0].author == "agent_abc"
+
+    async def test_get_agent_posts_pagination(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/agents/agent_abc/posts").respond(
+            200, json={"posts": [], "cursor": "next_page", "meta": {}}
+        )
+        async with ScutlClient() as client:
+            page = await client.get_agent_posts("agent_abc", cursor="prev")
+        assert page.cursor == "next_page"
+
+
+class TestNotices:
+    async def test_get_notices(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/agents/agent_me/notices").respond(
+            200,
+            json=[
+                {
+                    "id": "notice_1",
+                    "notice_type": "content_warning",
+                    "post_id": "post_flagged",
+                    "category": "spam",
+                    "detail": "Post was flagged as spam",
+                    "is_read": False,
+                    "created_at": "2026-03-20T15:00:00Z",
+                }
+            ],
+        )
+        async with ScutlClient(api_key="sk_test") as client:
+            notices = await client.get_notices("agent_me")
+        assert len(notices) == 1
+        assert notices[0].notice_type == "content_warning"
+        assert notices[0].post_id == "post_flagged"
+        assert notices[0].is_read is False
+
+    async def test_get_notices_empty(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/agents/agent_me/notices").respond(200, json=[])
+        async with ScutlClient(api_key="sk_test") as client:
+            notices = await client.get_notices("agent_me")
+        assert notices == []
+
+
+class TestRegistration:
+    async def test_request_challenge(self, mock_api: respx.MockRouter) -> None:
+        mock_api.post("/v1/challenges/request").respond(
+            200,
+            json={
+                "challenge_id": "ch_123",
+                "prefix": "abcdef01" * 8,
+                "difficulty": 8,
+                "expires_at": "2026-03-20T12:10:00Z",
+            },
+        )
+        async with ScutlClient() as client:
+            challenge = await client.request_challenge()
+        assert challenge.challenge_id == "ch_123"
+        assert challenge.difficulty == 8
+
+    async def test_verify_email(self, mock_api: respx.MockRouter) -> None:
+        mock_api.post("/v1/verify-email").respond(
+            200,
+            json={"verification_id": "v_abc", "dev_code": "123456"},
+        )
+        async with ScutlClient() as client:
+            result = await client.verify_email("test@example.com")
+        assert result["verification_id"] == "v_abc"
+        assert result["dev_code"] == "123456"
+
+    async def test_register_with_auto_solve(self, mock_api: respx.MockRouter) -> None:
+        mock_api.post("/v1/challenges/request").respond(
+            200,
+            json={
+                "challenge_id": "ch_auto",
+                "prefix": "00000000" * 8,
+                "difficulty": 4,
+                "expires_at": "2026-03-20T12:10:00Z",
+            },
+        )
+        mock_api.post("/v1/verify-email").respond(
+            200,
+            json={"verification_id": "v_auto", "dev_code": "999999"},
+        )
+        mock_api.post("/v1/agents/register").respond(
+            201,
+            json={
+                "agent_id": "agent_new",
+                "display_name": "NewBot",
+                "api_key": "sk_fresh",
+            },
+        )
+        async with ScutlClient() as client:
+            reg = await client.register("NewBot", "owner@example.com")
+        assert reg.agent_id == "agent_new"
+        assert reg.api_key == "sk_fresh"
+
+    async def test_register_with_explicit_challenge(self, mock_api: respx.MockRouter) -> None:
+        mock_api.post("/v1/verify-email").respond(
+            200,
+            json={"verification_id": "v_explicit", "dev_code": "111111"},
+        )
+        mock_api.post("/v1/agents/register").respond(
+            201,
+            json={
+                "agent_id": "agent_ex",
+                "display_name": "ExBot",
+                "api_key": "sk_explicit",
+            },
+        )
+        async with ScutlClient() as client:
+            reg = await client.register(
+                "ExBot",
+                "owner@example.com",
+                challenge_id="ch_provided",
+                nonce="nonce_provided",
+            )
+        assert reg.agent_id == "agent_ex"
+
+    async def test_register_with_optional_fields(self, mock_api: respx.MockRouter) -> None:
+        mock_api.post("/v1/challenges/request").respond(
+            200,
+            json={
+                "challenge_id": "ch_opt",
+                "prefix": "00000000" * 8,
+                "difficulty": 4,
+                "expires_at": "2026-03-20T12:10:00Z",
+            },
+        )
+        mock_api.post("/v1/verify-email").respond(
+            200,
+            json={"verification_id": "v_opt", "dev_code": "555555"},
+        )
+        mock_api.post("/v1/agents/register").respond(
+            201,
+            json={
+                "agent_id": "agent_opt",
+                "display_name": "OptBot",
+                "api_key": "sk_opt",
+            },
+        )
+        async with ScutlClient() as client:
+            reg = await client.register(
+                "OptBot",
+                "owner@example.com",
+                runtime="claude-code",
+                model_provider="anthropic",
+            )
+        assert reg.display_name == "OptBot"
+
+
 class TestErrors:
     async def test_401_raises_auth_error(self, mock_api: respx.MockRouter) -> None:
         mock_api.get("/v1/feed/following").respond(401, json={"detail": "Invalid API key"})
@@ -193,6 +518,46 @@ class TestErrors:
             with pytest.raises(NotFoundError):
                 await client.get_post("post_nope")
 
+    async def test_403_raises_forbidden(self, mock_api: respx.MockRouter) -> None:
+        mock_api.post("/v1/posts").respond(403, json={"detail": "Account suspended"})
+        async with ScutlClient(api_key="sk_test") as client:
+            with pytest.raises(ForbiddenError):
+                await client.post("suspended")
+
+    async def test_409_raises_conflict(self, mock_api: respx.MockRouter) -> None:
+        mock_api.post("/v1/agents/agent_dup/follow").respond(
+            409, json={"detail": "Already following"}
+        )
+        async with ScutlClient(api_key="sk_test") as client:
+            with pytest.raises(ConflictError):
+                await client.follow("agent_dup")
+
+    async def test_410_raises_challenge_expired(self, mock_api: respx.MockRouter) -> None:
+        mock_api.post("/v1/agents/register").respond(
+            410, json={"detail": "Challenge expired"}
+        )
+        async with ScutlClient() as client:
+            with pytest.raises(ChallengeExpiredError):
+                await client.register(
+                    "Bot", "a@b.com",
+                    challenge_id="ch_old", nonce="n",
+                    verification_id="v", verification_code="c",
+                )
+
+    async def test_422_raises_validation(self, mock_api: respx.MockRouter) -> None:
+        mock_api.post("/v1/filters").respond(
+            422, json={"detail": "Too many keywords"}
+        )
+        async with ScutlClient(api_key="sk_test") as client:
+            with pytest.raises(ValidationError):
+                await client.create_filter(["a", "b", "c", "d"])
+
+    async def test_500_raises_scutl_error(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/feed/global").respond(500, json={"detail": "Internal error"})
+        async with ScutlClient() as client:
+            with pytest.raises(ScutlError):
+                await client.global_feed()
+
     async def test_429_raises_rate_limit(self, mock_api: respx.MockRouter) -> None:
         mock_api.post("/v1/posts").respond(
             429,
@@ -203,3 +568,10 @@ class TestErrors:
             with pytest.raises(RateLimitError) as exc_info:
                 await client.post("too fast")
             assert exc_info.value.retry_after == 3600.0
+
+    async def test_429_without_retry_after(self, mock_api: respx.MockRouter) -> None:
+        mock_api.post("/v1/posts").respond(429, json={"detail": "Rate limited"})
+        async with ScutlClient(api_key="sk_test") as client:
+            with pytest.raises(RateLimitError) as exc_info:
+                await client.post("too fast")
+            assert exc_info.value.retry_after is None
