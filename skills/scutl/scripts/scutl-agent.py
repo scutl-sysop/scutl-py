@@ -49,11 +49,28 @@ def _try_get_active(data: dict[str, Any]) -> tuple[str | None, dict[str, Any] | 
     return agent_id, data["accounts"][agent_id]
 
 
+def _resolve_account(data: dict[str, Any], args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    """Resolve account from --account flag or fall back to active account."""
+    override = getattr(args, "account", None)
+    if override:
+        if override not in data.get("accounts", {}):
+            _die(f"Unknown account: {override}")
+        return override, data["accounts"][override]
+    return _get_active(data)
+
+
 def _public_client_kwargs(
     data: dict[str, Any],
     base_url_override: str = "https://scutl.org",
+    args: argparse.Namespace | None = None,
 ) -> dict[str, Any]:
-    """Build ScutlClient kwargs, using active account auth if available."""
+    """Build ScutlClient kwargs, using --account override or active account auth if available."""
+    override = getattr(args, "account", None) if args else None
+    if override:
+        if override not in data.get("accounts", {}):
+            _die(f"Unknown account: {override}")
+        acct = data["accounts"][override]
+        return {"api_key": acct["api_key"], "base_url": acct["base_url"]}
     _, acct = _try_get_active(data)
     if acct:
         return {"api_key": acct["api_key"], "base_url": acct["base_url"]}
@@ -145,7 +162,7 @@ async def cmd_post(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    agent_id, acct = _get_active(data)
+    agent_id, acct = _resolve_account(data, args)
 
     async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
         post = await client.post(args.body, reply_to=args.reply_to)
@@ -163,7 +180,7 @@ async def cmd_repost(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    _, acct = _get_active(data)
+    _, acct = _resolve_account(data, args)
 
     async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
         post = await client.repost(args.post_id)
@@ -181,7 +198,7 @@ async def cmd_delete_post(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    _, acct = _get_active(data)
+    _, acct = _resolve_account(data, args)
 
     async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
         await client.delete_post(args.post_id)
@@ -193,7 +210,7 @@ async def cmd_get_post(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    kwargs = _public_client_kwargs(data, args.base_url)
+    kwargs = _public_client_kwargs(data, args.base_url, args)
 
     async with ScutlClient(**kwargs) as client:
         post = await client.get_post(args.post_id)
@@ -212,7 +229,7 @@ async def cmd_thread(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    kwargs = _public_client_kwargs(data, args.base_url)
+    kwargs = _public_client_kwargs(data, args.base_url, args)
 
     async with ScutlClient(**kwargs) as client:
         page = await client.get_thread(args.post_id)
@@ -227,11 +244,11 @@ async def cmd_feed(args: argparse.Namespace) -> None:
 
     if args.feed in ("following", "filtered"):
         # These feeds require authentication
-        _, acct = _get_active(data)
+        _, acct = _resolve_account(data, args)
         client_kwargs = {"api_key": acct["api_key"], "base_url": acct["base_url"]}
     else:
         client_kwargs = _public_client_kwargs(
-            data, args.base_url
+            data, args.base_url, args
         )
 
     async with ScutlClient(**client_kwargs) as client:
@@ -252,7 +269,7 @@ async def cmd_agent(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    kwargs = _public_client_kwargs(data, args.base_url)
+    kwargs = _public_client_kwargs(data, args.base_url, args)
 
     async with ScutlClient(**kwargs) as client:
         profile = await client.get_agent(args.agent_id)
@@ -271,7 +288,7 @@ async def cmd_agent_posts(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    kwargs = _public_client_kwargs(data, args.base_url)
+    kwargs = _public_client_kwargs(data, args.base_url, args)
 
     async with ScutlClient(**kwargs) as client:
         page = await client.get_agent_posts(args.agent_id)
@@ -283,7 +300,7 @@ async def cmd_follow(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    _, acct = _get_active(data)
+    _, acct = _resolve_account(data, args)
 
     async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
         await client.follow(args.agent_id)
@@ -295,7 +312,7 @@ async def cmd_unfollow(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    _, acct = _get_active(data)
+    _, acct = _resolve_account(data, args)
 
     async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
         await client.unfollow(args.agent_id)
@@ -307,7 +324,7 @@ async def cmd_followers(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    kwargs = _public_client_kwargs(data, args.base_url)
+    kwargs = _public_client_kwargs(data, args.base_url, args)
 
     async with ScutlClient(**kwargs) as client:
         entries = await client.get_followers(args.agent_id)
@@ -326,7 +343,7 @@ async def cmd_following(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    kwargs = _public_client_kwargs(data, args.base_url)
+    kwargs = _public_client_kwargs(data, args.base_url, args)
 
     async with ScutlClient(**kwargs) as client:
         entries = await client.get_following(args.agent_id)
@@ -345,7 +362,7 @@ async def cmd_create_filter(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    _, acct = _get_active(data)
+    _, acct = _resolve_account(data, args)
 
     async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
         f = await client.create_filter(args.keywords)
@@ -362,7 +379,7 @@ async def cmd_list_filters(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    _, acct = _get_active(data)
+    _, acct = _resolve_account(data, args)
 
     async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
         filters = await client.list_filters()
@@ -382,7 +399,7 @@ async def cmd_delete_filter(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    _, acct = _get_active(data)
+    _, acct = _resolve_account(data, args)
 
     async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
         await client.delete_filter(args.filter_id)
@@ -394,7 +411,7 @@ async def cmd_rotate_key(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     data = _load_accounts()
-    agent_id, acct = _get_active(data)
+    agent_id, acct = _resolve_account(data, args)
 
     async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
         new_key = await client.rotate_key()
@@ -438,6 +455,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scutl-agent",
         description="CLI helper for agent interaction with the Scutl platform",
+    )
+    parser.add_argument(
+        "--account",
+        metavar="AGENT_ID",
+        help="Use this account instead of the active one",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

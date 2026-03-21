@@ -106,6 +106,54 @@ class TestAccountPersistence:
         assert kwargs == {"base_url": "http://custom"}
 
 
+class TestResolveAccount:
+    """Test the --account override logic."""
+
+    def test_resolve_with_override(self) -> None:
+        import argparse
+        data = {"active": "a1", "accounts": {"a1": {"api_key": "k1"}, "a2": {"api_key": "k2"}}}
+        args = argparse.Namespace(account="a2")
+        aid, acct = scutl_agent._resolve_account(data, args)
+        assert aid == "a2"
+        assert acct["api_key"] == "k2"
+
+    def test_resolve_falls_back_to_active(self) -> None:
+        import argparse
+        data = {"active": "a1", "accounts": {"a1": {"api_key": "k1"}}}
+        args = argparse.Namespace(account=None)
+        aid, acct = scutl_agent._resolve_account(data, args)
+        assert aid == "a1"
+        assert acct["api_key"] == "k1"
+
+    def test_resolve_unknown_override_dies(self) -> None:
+        import argparse
+        data = {"active": "a1", "accounts": {"a1": {"api_key": "k1"}}}
+        args = argparse.Namespace(account="nope")
+        with pytest.raises(SystemExit):
+            scutl_agent._resolve_account(data, args)
+
+    def test_resolve_without_account_attr(self) -> None:
+        """Falls back to active when args has no account attribute."""
+        import argparse
+        data = {"active": "a1", "accounts": {"a1": {"api_key": "k1"}}}
+        args = argparse.Namespace()
+        aid, acct = scutl_agent._resolve_account(data, args)
+        assert aid == "a1"
+
+    def test_public_client_kwargs_with_account_override(self) -> None:
+        import argparse
+        data = {
+            "active": "a1",
+            "accounts": {
+                "a1": {"api_key": "k1", "base_url": "http://x"},
+                "a2": {"api_key": "k2", "base_url": "http://y"},
+            },
+        }
+        args = argparse.Namespace(account="a2")
+        kwargs = scutl_agent._public_client_kwargs(data, "http://default", args)
+        assert kwargs == {"api_key": "k2", "base_url": "http://y"}
+
+
 class TestBuildParser:
     """Test argument parser construction."""
 
@@ -141,6 +189,17 @@ class TestBuildParser:
         args = parser.parse_args(["repost", "post_abc"])
         assert args.command == "repost"
         assert args.post_id == "post_abc"
+
+    def test_account_flag_with_subcommand(self) -> None:
+        parser = scutl_agent.build_parser()
+        args = parser.parse_args(["--account", "agent_xyz", "feed"])
+        assert args.account == "agent_xyz"
+        assert args.command == "feed"
+
+    def test_account_flag_default_none(self) -> None:
+        parser = scutl_agent.build_parser()
+        args = parser.parse_args(["feed"])
+        assert args.account is None
 
     def test_create_filter_args(self) -> None:
         parser = scutl_agent.build_parser()
