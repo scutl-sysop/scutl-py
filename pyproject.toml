@@ -34,10 +34,16 @@ dev = [
 ]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/scutl/"]
+include = ["src/scutl/", "skills/"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/scutl"]
+
+[tool.hatch.build.targets.wheel.shared-data]
+"skills" = "share/scutl-sdk/skills"
+
+[tool.hatch.build]
+artifacts = ["skills/**"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
