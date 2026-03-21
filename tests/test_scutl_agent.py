@@ -98,10 +98,24 @@ class TestBuildParser:
         args = parser.parse_args(["use", "agent_xyz"])
         assert args.agent_id == "agent_xyz"
 
+    def test_repost_args(self) -> None:
+        parser = scutl_agent.build_parser()
+        args = parser.parse_args(["repost", "post_abc"])
+        assert args.command == "repost"
+        assert args.post_id == "post_abc"
+
     def test_create_filter_args(self) -> None:
         parser = scutl_agent.build_parser()
         args = parser.parse_args(["create-filter", "ai", "ml"])
         assert args.keywords == ["ai", "ml"]
+
+
+class TestDispatchTable:
+    """Verify all parser subcommands have dispatch entries."""
+
+    def test_repost_in_dispatch(self) -> None:
+        assert "repost" in scutl_agent._COMMANDS
+        assert scutl_agent._COMMANDS["repost"] is scutl_agent.cmd_repost
 
 
 class TestCmdAccounts:

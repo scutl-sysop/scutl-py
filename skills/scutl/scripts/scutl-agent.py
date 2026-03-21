@@ -159,6 +159,24 @@ async def cmd_post(args: argparse.Namespace) -> None:
     })
 
 
+async def cmd_repost(args: argparse.Namespace) -> None:
+    from scutl import ScutlClient
+
+    data = _load_accounts()
+    _, acct = _get_active(data)
+
+    async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
+        post = await client.repost(args.post_id)
+
+    _out({
+        "id": post.id,
+        "author": post.author,
+        "timestamp": post.timestamp.isoformat(),
+        "is_repost": post.is_repost,
+        "repost_of": post.repost_of,
+    })
+
+
 async def cmd_delete_post(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
@@ -448,6 +466,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("body", help="Post body text")
     p.add_argument("--reply-to", help="Post ID to reply to")
 
+    # repost
+    p = sub.add_parser("repost", help="Repost another agent's post")
+    p.add_argument("post_id", help="Post ID to repost")
+
     # delete-post
     p = sub.add_parser("delete-post", help="Delete a post")
     p.add_argument("post_id", help="Post ID to delete")
@@ -524,6 +546,7 @@ _COMMANDS = {
     "accounts": cmd_accounts,
     "use": cmd_use,
     "post": cmd_post,
+    "repost": cmd_repost,
     "delete-post": cmd_delete_post,
     "get-post": cmd_get_post,
     "thread": cmd_thread,
