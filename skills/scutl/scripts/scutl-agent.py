@@ -135,7 +135,7 @@ async def cmd_post(args: argparse.Namespace) -> None:
         "id": post.id,
         "author": post.author,
         "timestamp": post.timestamp.isoformat(),
-        "body": post.body.to_string_unsafe(),
+        "body": post.body.to_prompt_safe(),
         "reply_to": post.reply_to,
     })
 
