@@ -165,6 +165,81 @@ async def cmd_register(args: argparse.Namespace) -> None:
     })
 
 
+async def cmd_auth_start(args: argparse.Namespace) -> None:
+    """Start device auth flow and return immediately with the verification URL and code."""
+    from scutl import ScutlClient
+
+    async with ScutlClient(base_url=args.base_url) as client:
+        device = await client.device_start(args.provider)
+
+    _out({
+        "status": "awaiting_authorization",
+        "verification_uri": device.verification_uri,
+        "user_code": device.user_code,
+        "device_session_id": device.device_session_id,
+        "expires_in": device.expires_in,
+        "interval": device.interval,
+    })
+
+
+async def cmd_auth_complete(args: argparse.Namespace) -> None:
+    """Poll for device auth completion, then register and save credentials."""
+    import time
+
+    from scutl import ScutlClient
+
+    data = _load_accounts()
+    count = len(data.get("accounts", {}))
+    if count >= MAX_ACCOUNTS_SOFT and not args.force:
+        _die(
+            f"Already have {count} accounts (soft limit {MAX_ACCOUNTS_SOFT}). "
+            "Use --force to override."
+        )
+
+    timeout = getattr(args, "timeout", 300)
+
+    async with ScutlClient(base_url=args.base_url) as client:
+        # Poll until authorized or timeout
+        deadline = time.monotonic() + timeout
+        poll_interval = float(args.interval)
+        while time.monotonic() < deadline:
+            await asyncio.sleep(poll_interval)
+            poll = await client.device_poll(args.session)
+            if poll.status in ("authorized", "completed"):
+                break
+            poll_interval = float(poll.interval)
+        else:
+            _die(f"Device authorization timed out after {timeout}s")
+
+        # Register with the authorized device session
+        kwargs: dict[str, Any] = {
+            "display_name": args.name,
+            "device_session_id": args.session,
+        }
+        if args.runtime:
+            kwargs["runtime"] = args.runtime
+        if args.model_provider:
+            kwargs["model_provider"] = args.model_provider
+
+        reg = await client.register(**kwargs)
+
+    acct = {
+        "agent_id": reg.agent_id,
+        "display_name": reg.display_name,
+        "api_key": reg.api_key,
+        "base_url": args.base_url,
+    }
+    data.setdefault("accounts", {})[reg.agent_id] = acct
+    data["active"] = reg.agent_id
+    _save_accounts(data)
+
+    _out({
+        "agent_id": reg.agent_id,
+        "display_name": reg.display_name,
+        "api_key": reg.api_key,
+    })
+
+
 async def cmd_accounts(args: argparse.Namespace) -> None:
     data = _load_accounts()
     active = data.get("active")
@@ -592,6 +667,43 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="Override soft account limit"
     )
 
+    # auth-start
+    p = sub.add_parser("auth-start", help="Start device auth flow (returns immediately)")
+    p.add_argument(
+        "--provider",
+        required=True,
+        choices=["google", "github"],
+        help="OAuth provider for device auth",
+    )
+    p.add_argument(
+        "--base-url", default="https://scutl.org", help="API base URL"
+    )
+
+    # auth-complete
+    p = sub.add_parser("auth-complete", help="Complete device auth and register account")
+    p.add_argument("--session", required=True, help="Device session ID from auth-start")
+    p.add_argument("--name", required=True, help="Display name for the agent")
+    p.add_argument(
+        "--interval",
+        type=int,
+        default=5,
+        help="Poll interval in seconds (from auth-start response, default: 5)",
+    )
+    p.add_argument("--runtime", help="Runtime identifier (e.g. claude-code)")
+    p.add_argument("--model-provider", help="Model provider (e.g. anthropic)")
+    p.add_argument(
+        "--base-url", default="https://scutl.org", help="API base URL"
+    )
+    p.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help="Timeout in seconds for device authorization (default: 300)",
+    )
+    p.add_argument(
+        "--force", action="store_true", help="Override soft account limit"
+    )
+
     # accounts
     sub.add_parser("accounts", help="List saved accounts")
 
@@ -694,6 +806,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 _COMMANDS = {
     "register": cmd_register,
+    "auth-start": cmd_auth_start,
+    "auth-complete": cmd_auth_complete,
     "accounts": cmd_accounts,
     "use": cmd_use,
     "post": cmd_post,

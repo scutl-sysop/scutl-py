@@ -369,6 +369,116 @@ class TestCmdRegister:
         assert final_out["agent_id"] == "agent_forced"
 
 
+class TestCmdAuthStart:
+    """Test the auth-start command."""
+
+    def test_auth_start_returns_device_info(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        mock_client = AsyncMock()
+        mock_client.device_start.return_value = DeviceStartResponse(
+            device_session_id="ds_abc",
+            user_code="1234-WXYZ",
+            verification_uri="https://github.com/login/device",
+            expires_in=899,
+            interval=5,
+        )
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        args = argparse.Namespace(
+            provider="github",
+            base_url="https://scutl.org",
+        )
+
+        with patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_auth_start(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "awaiting_authorization"
+        assert out["device_session_id"] == "ds_abc"
+        assert out["user_code"] == "1234-WXYZ"
+        assert out["verification_uri"] == "https://github.com/login/device"
+        assert out["expires_in"] == 899
+        assert out["interval"] == 5
+
+    def test_auth_start_parser(self) -> None:
+        parser = scutl_agent.build_parser()
+        args = parser.parse_args(["auth-start", "--provider", "google"])
+        assert args.command == "auth-start"
+        assert args.provider == "google"
+
+
+class TestCmdAuthComplete:
+    """Test the auth-complete command."""
+
+    def test_auth_complete_success(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, {"active": None, "accounts": {}})
+
+        mock_client = AsyncMock()
+        mock_client.device_poll.return_value = DevicePollResponse(
+            status="authorized", interval=5
+        )
+        mock_client.register.return_value = Registration(
+            agent_id="agent_new", display_name="NewBot", api_key="sk_fresh"
+        )
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        args = argparse.Namespace(
+            session="ds_abc",
+            name="NewBot",
+            interval=5,
+            runtime="claude-code",
+            model_provider="anthropic",
+            base_url="https://scutl.org",
+            force=False,
+            timeout=300,
+        )
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch.object(scutl_agent, "ACCOUNTS_DIR", tmp_path), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_auth_complete(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["agent_id"] == "agent_new"
+        assert out["api_key"] == "sk_fresh"
+
+        saved = json.loads(f.read_text())
+        assert saved["active"] == "agent_new"
+        assert "agent_new" in saved["accounts"]
+
+    def test_auth_complete_soft_limit_blocks(self, tmp_path: Path) -> None:
+        accounts = {f"agent_{i}": {"api_key": f"k{i}"} for i in range(5)}
+        f = _make_accounts_file(tmp_path, {"active": "agent_0", "accounts": accounts})
+        args = argparse.Namespace(
+            session="ds_abc",
+            name="OneMore",
+            interval=5,
+            runtime=None,
+            model_provider=None,
+            base_url="https://scutl.org",
+            force=False,
+            timeout=300,
+        )
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             pytest.raises(SystemExit):
+            asyncio.run(scutl_agent.cmd_auth_complete(args))
+
+    def test_auth_complete_parser(self) -> None:
+        parser = scutl_agent.build_parser()
+        args = parser.parse_args([
+            "auth-complete", "--session", "ds_abc", "--name", "bot",
+        ])
+        assert args.command == "auth-complete"
+        assert args.session == "ds_abc"
+        assert args.name == "bot"
+        assert args.interval == 5  # default
+
+
 class TestCmdPost:
     """Test the post command with mocked SDK."""
 
