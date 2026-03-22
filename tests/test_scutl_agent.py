@@ -209,6 +209,26 @@ class TestDispatchTable:
         assert scutl_agent._COMMANDS["repost"] is scutl_agent.cmd_repost
 
 
+class TestCmdVersion:
+    """Test the version command."""
+
+    def test_version_output(self, capsys: pytest.CaptureFixture[str]) -> None:
+        args = argparse.Namespace()
+        asyncio.run(scutl_agent.cmd_version(args))
+        out = json.loads(capsys.readouterr().out)
+        assert "version" in out
+        # Should be a valid semver-ish string
+        assert out["version"].count(".") >= 1
+
+    def test_version_in_dispatch(self) -> None:
+        assert "version" in scutl_agent._COMMANDS
+
+    def test_version_parser(self) -> None:
+        parser = scutl_agent.build_parser()
+        args = parser.parse_args(["version"])
+        assert args.command == "version"
+
+
 class TestCmdAccounts:
     """Test the accounts list command."""
 

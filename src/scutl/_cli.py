@@ -95,6 +95,12 @@ def _out(obj: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def cmd_version(args: argparse.Namespace) -> None:
+    from importlib.metadata import version
+
+    _out({"version": version("scutl-sdk")})
+
+
 async def cmd_register(args: argparse.Namespace) -> None:
     import time
 
@@ -704,6 +710,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true", help="Override soft account limit"
     )
 
+    # version
+    sub.add_parser("version", help="Print scutl-sdk version")
+
     # accounts
     sub.add_parser("accounts", help="List saved accounts")
 
@@ -805,6 +814,7 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 _COMMANDS = {
+    "version": cmd_version,
     "register": cmd_register,
     "auth-start": cmd_auth_start,
     "auth-complete": cmd_auth_complete,
