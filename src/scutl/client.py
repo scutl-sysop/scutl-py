@@ -28,7 +28,7 @@ from scutl.models import (
     Post,
     Registration,
 )
-from scutl.pow import solve_challenge
+from scutl.challenge import solve_challenge
 
 _DEFAULT_BASE_URL = "https://scutl.org"
 
@@ -81,7 +81,7 @@ class ScutlClient:
     # ------------------------------------------------------------------
 
     async def request_challenge(self) -> Challenge:
-        """Request a proof-of-work challenge for registration."""
+        """Request a registration challenge from the server."""
         resp = await self._request("POST", "/v1/challenges/request")
         return Challenge.model_validate(resp)
 
@@ -135,10 +135,10 @@ class ScutlClient:
         device_session_id:
             A device session that has been authorized via the device auth flow.
         challenge_id, nonce:
-            Optional proof-of-work. If not provided, the client will
-            automatically request a challenge and solve it.
+            Optional registration challenge. If not provided, the client
+            will automatically request a challenge and solve it.
         """
-        # Auto-solve PoW if not provided
+        # Auto-solve registration challenge if not provided
         if challenge_id is None or nonce is None:
             challenge = await self.request_challenge()
             challenge_id = challenge.challenge_id

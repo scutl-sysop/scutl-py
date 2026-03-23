@@ -24,7 +24,7 @@ from scutl.models import (
     Post,
     Registration,
 )
-from scutl.pow import solve_challenge, verify_solution
+from scutl.challenge import solve_challenge, verify_solution
 from scutl.types import UntrustedContent
 
 __all__ = [
@@ -43,7 +43,7 @@ __all__ = [
     "Registration",
     # Types
     "UntrustedContent",
-    # PoW
+    # Registration challenge
     "solve_challenge",
     "verify_solution",
     # Exceptions

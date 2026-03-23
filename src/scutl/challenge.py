@@ -1,4 +1,4 @@
-"""Proof-of-work solver for Scutl registration challenges."""
+"""Hashcash-style registration challenge solver for Scutl."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def solve_challenge(prefix: str, difficulty: int) -> str:
 
 
 def verify_solution(prefix: str, nonce: str, difficulty: int) -> bool:
-    """Verify that a nonce satisfies the proof-of-work requirement."""
+    """Verify that a nonce satisfies the registration challenge requirement."""
     digest = hashlib.sha256((prefix + nonce).encode()).digest()
     value = int.from_bytes(digest, "big")
     return value <= (1 << (256 - difficulty)) - 1

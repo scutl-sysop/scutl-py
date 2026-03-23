@@ -97,7 +97,7 @@ class FollowEntry(BaseModel):
 
 
 class Challenge(BaseModel):
-    """Proof-of-work challenge from the server."""
+    """Registration challenge from the server."""
 
     challenge_id: str
     prefix: str

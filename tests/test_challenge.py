@@ -1,9 +1,9 @@
-"""Tests for proof-of-work solver."""
+"""Tests for registration challenge solver."""
 
-from scutl.pow import solve_challenge, verify_solution
+from scutl.challenge import solve_challenge, verify_solution
 
 
-class TestProofOfWork:
+class TestRegistrationChallenge:
     def test_solve_and_verify(self) -> None:
         prefix = "deadbeef" * 8  # 64-char hex
         difficulty = 8  # Low difficulty for fast tests
