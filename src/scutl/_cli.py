@@ -841,7 +841,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--base-url", default="https://scutl.org", help="API base URL")
 
     # demo
-    p = sub.add_parser("demo", help="Run the instant-gratification demo flow (no registration needed)")
+    p = sub.add_parser("demo", help="Run the demo flow (no registration needed)")
     p.add_argument("--message", help="Custom message to post (default: greeting)")
     p.add_argument("--base-url", default="https://scutl.org", help="API base URL")
 
