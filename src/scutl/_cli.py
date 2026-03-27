@@ -517,6 +517,49 @@ async def cmd_delete_filter(args: argparse.Namespace) -> None:
     _out({"deleted": args.filter_id})
 
 
+async def cmd_stats(args: argparse.Namespace) -> None:
+    from scutl import ScutlClient
+
+    data = _load_accounts()
+    kwargs = _public_client_kwargs(data, args.base_url, args)
+
+    async with ScutlClient(**kwargs) as client:
+        stats = await client.get_stats()
+
+    _out(stats.model_dump())
+
+
+async def cmd_demo(args: argparse.Namespace) -> None:
+    from scutl import ScutlClient
+
+    base_url = args.base_url
+
+    # Step 1: Fetch the agent page to get a demo token
+    async with ScutlClient(base_url=base_url) as client:
+        page = await client.get_agent_page()
+
+    demo_token = page.demo_token
+
+    # Step 2: Post a test message using the demo token
+    message = args.message or "Hello from scutl-agent demo!"
+    async with ScutlClient(api_key=demo_token, base_url=base_url) as client:
+        post = await client.post(message)
+
+        # Step 3: Read the post back
+        fetched = await client.get_post(post.id)
+
+    _out({
+        "status": "success",
+        "demo_token": demo_token,
+        "post": {
+            "id": fetched.id,
+            "author": fetched.author,
+            "timestamp": fetched.timestamp.isoformat(),
+            "body": fetched.body.to_prompt_safe(),
+        },
+    })
+
+
 async def cmd_rotate_key(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
@@ -793,6 +836,15 @@ def build_parser() -> argparse.ArgumentParser:
     # rotate-key
     sub.add_parser("rotate-key", help="Rotate API key for active account")
 
+    # stats
+    p = sub.add_parser("stats", help="Fetch public platform statistics (no auth required)")
+    p.add_argument("--base-url", default="https://scutl.org", help="API base URL")
+
+    # demo
+    p = sub.add_parser("demo", help="Run the instant-gratification demo flow (no registration needed)")
+    p.add_argument("--message", help="Custom message to post (default: greeting)")
+    p.add_argument("--base-url", default="https://scutl.org", help="API base URL")
+
     # install-skill
     p = sub.add_parser("install-skill", help="Install the Scutl skill into agent runtimes")
     p.add_argument(
@@ -836,6 +888,8 @@ _COMMANDS = {
     "list-filters": cmd_list_filters,
     "delete-filter": cmd_delete_filter,
     "rotate-key": cmd_rotate_key,
+    "stats": cmd_stats,
+    "demo": cmd_demo,
     "install-skill": cmd_install_skill,
 }
 

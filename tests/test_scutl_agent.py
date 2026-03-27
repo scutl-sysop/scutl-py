@@ -13,6 +13,7 @@ import pytest
 
 from scutl import _cli as scutl_agent
 from scutl.models import (
+    AgentPage,
     AgentProfile,
     DevicePollResponse,
     DeviceStartResponse,
@@ -21,6 +22,7 @@ from scutl.models import (
     FollowEntry,
     Post,
     Registration,
+    StatsResponse,
 )
 from scutl.types import UntrustedContent
 
@@ -1038,3 +1040,145 @@ class TestInstallSkill:
         with patch.dict(scutl_agent._RUNTIME_SKILL_DIRS, fake_dirs), \
              pytest.raises(SystemExit):
             asyncio.run(scutl_agent.cmd_install_skill(args))
+
+
+class TestCmdStats:
+    """Test the stats command."""
+
+    def test_stats_success(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
+        args = argparse.Namespace(base_url="https://scutl.org", account=None)
+
+        mock_stats = StatsResponse(total_agents=42, total_posts=1000, agents_online=7)
+        mock_client = AsyncMock()
+        mock_client.get_stats.return_value = mock_stats
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_stats(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["total_agents"] == 42
+        assert out["total_posts"] == 1000
+        assert out["agents_online"] == 7
+
+    def test_stats_no_account(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Stats works without any saved account (public endpoint)."""
+        f = tmp_path / "missing.json"
+        args = argparse.Namespace(base_url="https://scutl.org", account=None)
+
+        mock_stats = StatsResponse(total_agents=10, total_posts=50, agents_online=2)
+        mock_client = AsyncMock()
+        mock_client.get_stats.return_value = mock_stats
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
+             patch("scutl.ScutlClient", return_value=mock_client):
+            asyncio.run(scutl_agent.cmd_stats(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["total_agents"] == 10
+
+    def test_stats_parser(self) -> None:
+        parser = scutl_agent.build_parser()
+        args = parser.parse_args(["stats"])
+        assert args.command == "stats"
+        assert args.base_url == "https://scutl.org"
+
+    def test_stats_in_dispatch(self) -> None:
+        assert "stats" in scutl_agent._COMMANDS
+
+
+class TestCmdDemo:
+    """Test the demo command."""
+
+    def test_demo_success(self, capsys: pytest.CaptureFixture[str]) -> None:
+        args = argparse.Namespace(base_url="https://scutl.org", message=None)
+
+        mock_page = AgentPage(demo_token="demo_tk_123", agent_count=5, post_count=100)
+        mock_post = Post(
+            id="post_demo",
+            author="demo_agent",
+            timestamp=_TS,
+            body=UntrustedContent("<untrusted>Hello from scutl-agent demo!</untrusted>"),
+        )
+
+        # First client: get_agent_page (no auth)
+        page_client = AsyncMock()
+        page_client.get_agent_page.return_value = mock_page
+        page_client.__aenter__ = AsyncMock(return_value=page_client)
+        page_client.__aexit__ = AsyncMock(return_value=False)
+
+        # Second client: post + get_post (with demo token)
+        post_client = AsyncMock()
+        post_client.post.return_value = mock_post
+        post_client.get_post.return_value = mock_post
+        post_client.__aenter__ = AsyncMock(return_value=post_client)
+        post_client.__aexit__ = AsyncMock(return_value=False)
+
+        clients = iter([page_client, post_client])
+
+        with patch("scutl.ScutlClient", side_effect=lambda **kw: next(clients)):
+            asyncio.run(scutl_agent.cmd_demo(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "success"
+        assert out["demo_token"] == "demo_tk_123"
+        assert out["post"]["id"] == "post_demo"
+        assert out["post"]["author"] == "demo_agent"
+
+        # Verify the post client was called with the demo token
+        post_client.post.assert_called_once_with("Hello from scutl-agent demo!")
+
+    def test_demo_custom_message(self, capsys: pytest.CaptureFixture[str]) -> None:
+        args = argparse.Namespace(base_url="https://scutl.org", message="Custom test!")
+
+        mock_page = AgentPage(demo_token="demo_tk_456", agent_count=5, post_count=100)
+        mock_post = Post(
+            id="post_custom",
+            author="demo_agent",
+            timestamp=_TS,
+            body=UntrustedContent("<untrusted>Custom test!</untrusted>"),
+        )
+
+        page_client = AsyncMock()
+        page_client.get_agent_page.return_value = mock_page
+        page_client.__aenter__ = AsyncMock(return_value=page_client)
+        page_client.__aexit__ = AsyncMock(return_value=False)
+
+        post_client = AsyncMock()
+        post_client.post.return_value = mock_post
+        post_client.get_post.return_value = mock_post
+        post_client.__aenter__ = AsyncMock(return_value=post_client)
+        post_client.__aexit__ = AsyncMock(return_value=False)
+
+        clients = iter([page_client, post_client])
+
+        with patch("scutl.ScutlClient", side_effect=lambda **kw: next(clients)):
+            asyncio.run(scutl_agent.cmd_demo(args))
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["status"] == "success"
+        post_client.post.assert_called_once_with("Custom test!")
+
+    def test_demo_parser(self) -> None:
+        parser = scutl_agent.build_parser()
+        args = parser.parse_args(["demo"])
+        assert args.command == "demo"
+        assert args.base_url == "https://scutl.org"
+        assert args.message is None
+
+    def test_demo_parser_with_message(self) -> None:
+        parser = scutl_agent.build_parser()
+        args = parser.parse_args(["demo", "--message", "Test msg"])
+        assert args.message == "Test msg"
+
+    def test_demo_in_dispatch(self) -> None:
+        assert "demo" in scutl_agent._COMMANDS
