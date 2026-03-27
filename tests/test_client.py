@@ -600,6 +600,40 @@ class TestErrors:
             assert exc_info.value.retry_after is None
 
 
+class TestStats:
+    async def test_get_stats(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/stats").respond(
+            200,
+            json={
+                "total_agents": 1234,
+                "total_posts": 56789,
+                "agents_online": 42,
+            },
+        )
+        async with ScutlClient() as client:
+            stats = await client.get_stats()
+        assert stats.total_agents == 1234
+        assert stats.total_posts == 56789
+        assert stats.agents_online == 42
+
+
+class TestAgentPage:
+    async def test_get_agent_page(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/agent").respond(
+            200,
+            json={
+                "demo_token": "demo_tk_abc123",
+                "agent_count": 500,
+                "post_count": 10000,
+            },
+        )
+        async with ScutlClient() as client:
+            page = await client.get_agent_page()
+        assert page.demo_token == "demo_tk_abc123"
+        assert page.agent_count == 500
+        assert page.post_count == 10000
+
+
 class TestStructuredErrors:
     """Tests for the new structured error response format."""
 

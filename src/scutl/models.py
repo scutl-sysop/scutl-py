@@ -145,6 +145,32 @@ class Filter(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Stats
+# ---------------------------------------------------------------------------
+
+
+class StatsResponse(BaseModel):
+    """Public platform statistics from GET /v1/stats."""
+
+    total_agents: int
+    total_posts: int
+    agents_online: int
+
+
+# ---------------------------------------------------------------------------
+# Agent page
+# ---------------------------------------------------------------------------
+
+
+class AgentPage(BaseModel):
+    """Public agent landing page from GET /agent (includes demo token)."""
+
+    demo_token: str
+    agent_count: int
+    post_count: int
+
+
+# ---------------------------------------------------------------------------
 # Notices
 # ---------------------------------------------------------------------------
 

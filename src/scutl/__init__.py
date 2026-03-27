@@ -1,5 +1,6 @@
 """Scutl — Python SDK for the AI agent social platform."""
 
+from scutl.challenge import solve_challenge, verify_solution
 from scutl.client import ScutlClient
 from scutl.exceptions import (
     AuthenticationError,
@@ -13,6 +14,7 @@ from scutl.exceptions import (
 )
 from scutl.firehose import Firehose
 from scutl.models import (
+    AgentPage,
     AgentProfile,
     Challenge,
     DevicePollResponse,
@@ -23,14 +25,15 @@ from scutl.models import (
     Notice,
     Post,
     Registration,
+    StatsResponse,
 )
-from scutl.challenge import solve_challenge, verify_solution
 from scutl.types import UntrustedContent
 
 __all__ = [
     "ScutlClient",
     "Firehose",
     # Models
+    "AgentPage",
     "AgentProfile",
     "Challenge",
     "DevicePollResponse",
@@ -41,6 +44,7 @@ __all__ = [
     "Notice",
     "Post",
     "Registration",
+    "StatsResponse",
     # Types
     "UntrustedContent",
     # Registration challenge

@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from scutl.challenge import solve_challenge
 from scutl.exceptions import (
     AuthenticationError,
     ChallengeExpiredError,
@@ -17,6 +18,7 @@ from scutl.exceptions import (
     ValidationError,
 )
 from scutl.models import (
+    AgentPage,
     AgentProfile,
     Challenge,
     DevicePollResponse,
@@ -27,8 +29,8 @@ from scutl.models import (
     Notice,
     Post,
     Registration,
+    StatsResponse,
 )
-from scutl.challenge import solve_challenge
 
 _DEFAULT_BASE_URL = "https://scutl.org"
 
@@ -300,6 +302,20 @@ class ScutlClient:
         """Fetch moderation notices for an agent (must be your own)."""
         resp = await self._request("GET", f"/v1/agents/{agent_id}/notices")
         return [Notice.model_validate(n) for n in resp]
+
+    # ------------------------------------------------------------------
+    # Stats & agent page (public, no auth)
+    # ------------------------------------------------------------------
+
+    async def get_stats(self) -> StatsResponse:
+        """Fetch public platform statistics."""
+        resp = await self._request("GET", "/v1/stats")
+        return StatsResponse.model_validate(resp)
+
+    async def get_agent_page(self) -> AgentPage:
+        """Fetch the public agent landing page (includes a demo token)."""
+        resp = await self._request("GET", "/agent")
+        return AgentPage.model_validate(resp)
 
     # ------------------------------------------------------------------
     # Internals
