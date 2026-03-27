@@ -598,3 +598,134 @@ class TestErrors:
             with pytest.raises(RateLimitError) as exc_info:
                 await client.post("too fast")
             assert exc_info.value.retry_after is None
+
+
+class TestStructuredErrors:
+    """Tests for the new structured error response format."""
+
+    async def test_structured_error_exposes_hint_action_meta(
+        self, mock_api: respx.MockRouter
+    ) -> None:
+        mock_api.get("/v1/feed/global").respond(
+            403,
+            json={
+                "error": "forbidden",
+                "code": "ACCOUNT_SUSPENDED",
+                "message": "Your account has been suspended",
+                "hint": "Contact support to appeal",
+                "action": "mailto:support@scutl.org",
+                "meta": {"suspended_at": "2026-03-20T10:00:00Z"},
+            },
+        )
+        async with ScutlClient() as client:
+            with pytest.raises(ForbiddenError) as exc_info:
+                await client.global_feed()
+            err = exc_info.value
+            assert "Your account has been suspended" in str(err)
+            assert err.status_code == 403
+            assert err.hint == "Contact support to appeal"
+            assert err.action == "mailto:support@scutl.org"
+            assert err.meta == {"suspended_at": "2026-03-20T10:00:00Z"}
+
+    async def test_structured_error_missing_optional_fields(
+        self, mock_api: respx.MockRouter
+    ) -> None:
+        mock_api.get("/v1/feed/global").respond(
+            404,
+            json={
+                "error": "not_found",
+                "code": "RESOURCE_NOT_FOUND",
+                "message": "Post not found",
+            },
+        )
+        async with ScutlClient() as client:
+            with pytest.raises(NotFoundError) as exc_info:
+                await client.global_feed()
+            err = exc_info.value
+            assert "Post not found" in str(err)
+            assert err.hint is None
+            assert err.action is None
+            assert err.meta is None
+
+    async def test_old_detail_format_still_works(
+        self, mock_api: respx.MockRouter
+    ) -> None:
+        mock_api.get("/v1/feed/following").respond(
+            401, json={"detail": "Invalid API key"}
+        )
+        async with ScutlClient() as client:
+            with pytest.raises(AuthenticationError) as exc_info:
+                await client.following_feed()
+            err = exc_info.value
+            assert "Invalid API key" in str(err)
+            assert err.hint is None
+            assert err.action is None
+            assert err.meta is None
+
+    async def test_429_retry_after_from_meta(
+        self, mock_api: respx.MockRouter
+    ) -> None:
+        mock_api.post("/v1/posts").respond(
+            429,
+            json={
+                "error": "rate_limited",
+                "code": "RATE_LIMIT_EXCEEDED",
+                "message": "Too many requests",
+                "hint": "Slow down",
+                "action": "wait",
+                "meta": {"retry_after": 120},
+            },
+        )
+        async with ScutlClient(api_key="sk_test") as client:
+            with pytest.raises(RateLimitError) as exc_info:
+                await client.post("too fast")
+            err = exc_info.value
+            assert err.retry_after == 120.0
+            assert err.hint == "Slow down"
+            assert err.action == "wait"
+            assert err.meta == {"retry_after": 120}
+
+    async def test_429_meta_retry_after_preferred_over_header(
+        self, mock_api: respx.MockRouter
+    ) -> None:
+        mock_api.post("/v1/posts").respond(
+            429,
+            json={
+                "error": "rate_limited",
+                "code": "RATE_LIMIT_EXCEEDED",
+                "message": "Too many requests",
+                "meta": {"retry_after": 60},
+            },
+            headers={"Retry-After": "3600"},
+        )
+        async with ScutlClient(api_key="sk_test") as client:
+            with pytest.raises(RateLimitError) as exc_info:
+                await client.post("too fast")
+            assert exc_info.value.retry_after == 60.0
+
+    async def test_structured_message_preferred_over_detail(
+        self, mock_api: respx.MockRouter
+    ) -> None:
+        mock_api.get("/v1/feed/global").respond(
+            500,
+            json={
+                "error": "internal",
+                "code": "INTERNAL_ERROR",
+                "message": "Something broke",
+                "detail": "Old detail string",
+            },
+        )
+        async with ScutlClient() as client:
+            with pytest.raises(ScutlError) as exc_info:
+                await client.global_feed()
+            assert "Something broke" in str(exc_info.value)
+
+    async def test_plain_text_error_response(
+        self, mock_api: respx.MockRouter
+    ) -> None:
+        mock_api.get("/v1/feed/global").respond(502, text="Bad Gateway")
+        async with ScutlClient() as client:
+            with pytest.raises(ScutlError) as exc_info:
+                await client.global_feed()
+            assert "Bad Gateway" in str(exc_info.value)
+            assert exc_info.value.hint is None

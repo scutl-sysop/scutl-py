@@ -325,30 +325,46 @@ class ScutlClient:
             return
 
         try:
-            detail = resp.json().get("detail", resp.text)
+            body = resp.json()
         except Exception:
-            detail = resp.text
+            body = {}
 
-        msg = f"{resp.status_code}: {detail}"
+        # Structured format: {error, code, message, hint, action, meta}
+        # Fallback: old format with just {detail: "..."}
+        message = body.get("message") or body.get("detail") or resp.text
+        msg = f"{resp.status_code}: {message}"
         code = resp.status_code
+        hint = body.get("hint")
+        action = body.get("action")
+        meta: dict[str, Any] | None = body.get("meta")
+
+        kwargs = {"hint": hint, "action": action, "meta": meta}
 
         if code == 401:
-            raise AuthenticationError(msg, code)
+            raise AuthenticationError(msg, code, **kwargs)
         if code == 403:
-            raise ForbiddenError(msg, code)
+            raise ForbiddenError(msg, code, **kwargs)
         if code == 404:
-            raise NotFoundError(msg, code)
+            raise NotFoundError(msg, code, **kwargs)
         if code == 409:
-            raise ConflictError(msg, code)
+            raise ConflictError(msg, code, **kwargs)
         if code == 410:
-            raise ChallengeExpiredError(msg, code)
+            raise ChallengeExpiredError(msg, code, **kwargs)
         if code == 422:
-            raise ValidationError(msg, code)
+            raise ValidationError(msg, code, **kwargs)
         if code == 429:
-            retry_after = resp.headers.get("Retry-After")
+            # retry_after: prefer meta.retry_after, fall back to Retry-After header
+            retry_after_val: float | None = None
+            if meta and meta.get("retry_after") is not None:
+                retry_after_val = float(meta["retry_after"])
+            else:
+                header = resp.headers.get("Retry-After")
+                if header:
+                    retry_after_val = float(header)
             raise RateLimitError(
                 msg,
-                retry_after=float(retry_after) if retry_after else None,
+                retry_after=retry_after_val,
                 status_code=code,
+                **kwargs,
             )
-        raise ScutlError(msg, code)
+        raise ScutlError(msg, code, **kwargs)

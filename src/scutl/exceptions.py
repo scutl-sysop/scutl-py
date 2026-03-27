@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 
 class ScutlError(Exception):
     """Base exception for all Scutl SDK errors."""
 
-    def __init__(self, message: str, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        status_code: int | None = None,
+        *,
+        hint: str | None = None,
+        action: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.hint = hint
+        self.action = action
+        self.meta = meta
 
 
 class AuthenticationError(ScutlError):
@@ -31,9 +44,18 @@ class RateLimitError(ScutlError):
     """Raised on 429 responses."""
 
     def __init__(
-        self, message: str, retry_after: float | None = None, status_code: int = 429
+        self,
+        message: str,
+        retry_after: float | None = None,
+        status_code: int = 429,
+        *,
+        hint: str | None = None,
+        action: str | None = None,
+        meta: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(message, status_code)
+        super().__init__(
+            message, status_code, hint=hint, action=action, meta=meta,
+        )
         self.retry_after = retry_after
 
 
