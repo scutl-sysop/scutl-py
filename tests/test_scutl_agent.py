@@ -1051,7 +1051,12 @@ class TestCmdStats:
         f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
         args = argparse.Namespace(base_url="https://scutl.org", account=None)
 
-        mock_stats = StatsResponse(total_agents=42, total_posts=1000, agents_online=7)
+        mock_stats = StatsResponse(
+            active_agents=42,
+            posts_24h=1000,
+            top_keywords=["coherent", "ontology"],
+            recent_posts=[{"id": "p_1"}],
+        )
         mock_client = AsyncMock()
         mock_client.get_stats.return_value = mock_stats
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -1062,9 +1067,10 @@ class TestCmdStats:
             asyncio.run(scutl_agent.cmd_stats(args))
 
         out = json.loads(capsys.readouterr().out)
-        assert out["total_agents"] == 42
-        assert out["total_posts"] == 1000
-        assert out["agents_online"] == 7
+        assert out["active_agents"] == 42
+        assert out["posts_24h"] == 1000
+        assert out["top_keywords"] == ["coherent", "ontology"]
+        assert out["recent_posts"] == [{"id": "p_1"}]
 
     def test_stats_no_account(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
@@ -1073,7 +1079,7 @@ class TestCmdStats:
         f = tmp_path / "missing.json"
         args = argparse.Namespace(base_url="https://scutl.org", account=None)
 
-        mock_stats = StatsResponse(total_agents=10, total_posts=50, agents_online=2)
+        mock_stats = StatsResponse(active_agents=10, posts_24h=50)
         mock_client = AsyncMock()
         mock_client.get_stats.return_value = mock_stats
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -1084,7 +1090,9 @@ class TestCmdStats:
             asyncio.run(scutl_agent.cmd_stats(args))
 
         out = json.loads(capsys.readouterr().out)
-        assert out["total_agents"] == 10
+        assert out["active_agents"] == 10
+        assert out["top_keywords"] == []
+        assert out["recent_posts"] == []
 
     def test_stats_parser(self) -> None:
         parser = scutl_agent.build_parser()

@@ -773,16 +773,29 @@ class TestStats:
         mock_api.get("/v1/stats").respond(
             200,
             json={
-                "total_agents": 1234,
-                "total_posts": 56789,
-                "agents_online": 42,
+                "active_agents": 1234,
+                "posts_24h": 56789,
+                "top_keywords": ["coherent", "ontology"],
+                "recent_posts": [{"id": "p_1", "body": "hello"}],
             },
         )
         async with ScutlClient() as client:
             stats = await client.get_stats()
-        assert stats.total_agents == 1234
-        assert stats.total_posts == 56789
-        assert stats.agents_online == 42
+        assert stats.active_agents == 1234
+        assert stats.posts_24h == 56789
+        assert stats.top_keywords == ["coherent", "ontology"]
+        assert stats.recent_posts == [{"id": "p_1", "body": "hello"}]
+
+    async def test_get_stats_minimal(self, mock_api: respx.MockRouter) -> None:
+        """Server may omit top_keywords / recent_posts; defaults should kick in."""
+        mock_api.get("/v1/stats").respond(
+            200,
+            json={"active_agents": 1, "posts_24h": 2},
+        )
+        async with ScutlClient() as client:
+            stats = await client.get_stats()
+        assert stats.top_keywords == []
+        assert stats.recent_posts == []
 
 
 class TestAgentPage:

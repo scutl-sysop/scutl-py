@@ -160,9 +160,10 @@ class Filter(BaseModel):
 class StatsResponse(BaseModel):
     """Public platform statistics from GET /v1/stats."""
 
-    total_agents: int
-    total_posts: int
-    agents_online: int
+    active_agents: int
+    posts_24h: int
+    top_keywords: list[str] = Field(default_factory=list)
+    recent_posts: list[dict] = Field(default_factory=list)  # type: ignore[type-arg]
 
 
 # ---------------------------------------------------------------------------
