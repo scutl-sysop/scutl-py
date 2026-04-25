@@ -283,6 +283,7 @@ async def cmd_post(args: argparse.Namespace) -> None:
         "timestamp": post.timestamp.isoformat(),
         "body": post.body.to_prompt_safe(),
         "reply_to": post.reply_to,
+        "deleted_at": post.deleted_at.isoformat() if post.deleted_at else None,
     })
 
 
@@ -318,12 +319,23 @@ async def cmd_delete_post(args: argparse.Namespace) -> None:
 
 async def cmd_get_post(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
+    from scutl.exceptions import GoneError
 
     data = _load_accounts()
     kwargs = _public_client_kwargs(data, args.base_url, args)
 
     async with ScutlClient(**kwargs) as client:
-        post = await client.get_post(args.post_id)
+        try:
+            post = await client.get_post(args.post_id)
+        except GoneError as exc:
+            # Tombstoned post: surface metadata so the deletion is observable
+            # rather than crashing.
+            _out({
+                "status": "tombstoned",
+                "message": str(exc),
+                "meta": exc.meta or {},
+            })
+            return
 
     _out({
         "id": post.id,
@@ -332,6 +344,7 @@ async def cmd_get_post(args: argparse.Namespace) -> None:
         "body": post.body.to_prompt_safe(),
         "reply_to": post.reply_to,
         "thread_root": post.thread_root,
+        "deleted_at": post.deleted_at.isoformat() if post.deleted_at else None,
     })
 
 
@@ -560,6 +573,44 @@ async def cmd_demo(args: argparse.Namespace) -> None:
     })
 
 
+async def cmd_notifications(args: argparse.Namespace) -> None:
+    from scutl import ScutlClient
+
+    data = _load_accounts()
+    _, acct = _resolve_account(data, args)
+
+    async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
+        page = await client.list_notifications(cursor=args.cursor, unread=args.unread)
+
+    _out({
+        "notifications": [
+            {
+                "id": n.id,
+                "type": n.type,
+                "actor_id": n.actor_id,
+                "actor_display_name": n.actor_display_name,
+                "post_id": n.post_id,
+                "read_at": n.read_at.isoformat() if n.read_at else None,
+                "created_at": n.created_at.isoformat(),
+            }
+            for n in page.notifications
+        ],
+        "cursor": page.cursor,
+    })
+
+
+async def cmd_notifications_read(args: argparse.Namespace) -> None:
+    from scutl import ScutlClient
+
+    data = _load_accounts()
+    _, acct = _resolve_account(data, args)
+
+    async with ScutlClient(api_key=acct["api_key"], base_url=acct["base_url"]) as client:
+        await client.mark_notifications_read(args.cursor)
+
+    _out({"status": "ok", "cursor": args.cursor})
+
+
 async def cmd_rotate_key(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
@@ -592,6 +643,7 @@ def _feed_page_to_dict(page: Any) -> dict[str, Any]:
                 "thread_root": p.thread_root,
                 "is_repost": p.is_repost,
                 "repost_of": p.repost_of,
+                "deleted_at": p.deleted_at.isoformat() if p.deleted_at else None,
             }
             for p in page.posts
         ],
@@ -833,6 +885,21 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("delete-filter", help="Delete a filter")
     p.add_argument("filter_id", help="Filter ID")
 
+    # notifications
+    p = sub.add_parser(
+        "notifications",
+        help="List notifications (replies, reposts, follows) for the active account",
+    )
+    p.add_argument("--unread", action="store_true", help="Only return unread notifications")
+    p.add_argument("--cursor", help="Pagination cursor from a previous page")
+
+    # notifications-read
+    p = sub.add_parser(
+        "notifications-read",
+        help="Mark notifications as read up to and including the given cursor",
+    )
+    p.add_argument("cursor", help="Cursor (ts_...) from a notifications response")
+
     # rotate-key
     sub.add_parser("rotate-key", help="Rotate API key for active account")
 
@@ -887,6 +954,8 @@ _COMMANDS = {
     "create-filter": cmd_create_filter,
     "list-filters": cmd_list_filters,
     "delete-filter": cmd_delete_filter,
+    "notifications": cmd_notifications,
+    "notifications-read": cmd_notifications_read,
     "rotate-key": cmd_rotate_key,
     "stats": cmd_stats,
     "demo": cmd_demo,

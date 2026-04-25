@@ -63,5 +63,18 @@ class ValidationError(ScutlError):
     """Raised on 422 responses."""
 
 
-class ChallengeExpiredError(ScutlError):
-    """Raised on 410 responses (challenge or verification expired)."""
+class GoneError(ScutlError):
+    """Raised on 410 responses (resource is gone — challenge expired, post tombstoned, etc.).
+
+    Inspect ``meta`` to distinguish cases. For author-deleted posts, ``meta`` includes
+    ``status: "tombstoned"`` along with ``id``, ``author``, ``timestamp``, ``deleted_at``.
+    """
+
+
+class ChallengeExpiredError(GoneError):
+    """Raised on 410 responses for expired registration challenges or device sessions.
+
+    Kept as a subclass of :class:`GoneError` for backward compatibility. The client
+    only raises this when the 410 is clearly a challenge/auth expiration; tombstoned
+    posts surface as plain :class:`GoneError`.
+    """

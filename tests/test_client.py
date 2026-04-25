@@ -9,6 +9,7 @@ from scutl.exceptions import (
     ChallengeExpiredError,
     ConflictError,
     ForbiddenError,
+    GoneError,
     NotFoundError,
     RateLimitError,
     ScutlError,
@@ -567,6 +568,38 @@ class TestErrors:
                     challenge_id="ch_old", nonce="n",
                 )
 
+    async def test_410_tombstoned_raises_gone_not_challenge_expired(
+        self, mock_api: respx.MockRouter
+    ) -> None:
+        mock_api.get("/v1/posts/post_dead").respond(
+            410,
+            json={
+                "error": "gone",
+                "code": "POST_TOMBSTONED",
+                "message": "Post tombstoned.",
+                "meta": {
+                    "id": "post_dead",
+                    "author": "agent_a",
+                    "timestamp": "2026-04-20T12:00:00Z",
+                    "deleted_at": "2026-04-25T09:00:00Z",
+                    "status": "tombstoned",
+                },
+            },
+        )
+        async with ScutlClient() as client:
+            with pytest.raises(GoneError) as exc_info:
+                await client.get_post("post_dead")
+        # Must NOT be a ChallengeExpiredError — that would mislead callers.
+        assert not isinstance(exc_info.value, ChallengeExpiredError)
+        assert exc_info.value.meta is not None
+        assert exc_info.value.meta["status"] == "tombstoned"
+        assert exc_info.value.meta["deleted_at"] == "2026-04-25T09:00:00Z"
+
+    async def test_challenge_expired_is_subclass_of_gone_for_back_compat(self) -> None:
+        # Existing callers catching ChallengeExpiredError should keep working;
+        # new callers can broaden to GoneError.
+        assert issubclass(ChallengeExpiredError, GoneError)
+
     async def test_422_raises_validation(self, mock_api: respx.MockRouter) -> None:
         mock_api.post("/v1/filters").respond(
             422, json={"detail": "Too many keywords"}
@@ -598,6 +631,141 @@ class TestErrors:
             with pytest.raises(RateLimitError) as exc_info:
                 await client.post("too fast")
             assert exc_info.value.retry_after is None
+
+
+class TestTombstones:
+    async def test_thread_includes_tombstoned_posts(
+        self, mock_api: respx.MockRouter
+    ) -> None:
+        mock_api.get("/v1/posts/post_root/thread").respond(
+            200,
+            json={
+                "posts": [
+                    {
+                        "id": "post_root",
+                        "author": "agent_a",
+                        "timestamp": "2026-04-20T12:00:00Z",
+                        "body": "<untrusted>root</untrusted>",
+                        "reply_to": None,
+                        "thread_root": None,
+                        "deleted_at": None,
+                    },
+                    {
+                        "id": "post_gone",
+                        "author": "agent_b",
+                        "timestamp": "2026-04-20T12:05:00Z",
+                        "body": "[tombstoned]",
+                        "reply_to": "post_root",
+                        "thread_root": "post_root",
+                        "deleted_at": "2026-04-25T09:00:00Z",
+                    },
+                ],
+                "cursor": None,
+                "meta": {},
+            },
+        )
+        async with ScutlClient() as client:
+            page = await client.get_thread("post_root")
+        assert len(page.posts) == 2
+        assert page.posts[0].deleted_at is None
+        assert page.posts[0].is_tombstoned is False
+        assert page.posts[1].deleted_at is not None
+        assert page.posts[1].is_tombstoned is True
+
+    async def test_post_without_deleted_at_field_still_works(
+        self, mock_api: respx.MockRouter
+    ) -> None:
+        # Ensure older server responses (no deleted_at key) still deserialize.
+        mock_api.get("/v1/posts/post_old").respond(
+            200,
+            json={
+                "id": "post_old",
+                "author": "agent_a",
+                "timestamp": "2026-03-20T12:00:00Z",
+                "body": "<untrusted>old shape</untrusted>",
+                "reply_to": None,
+                "thread_root": None,
+            },
+        )
+        async with ScutlClient() as client:
+            post = await client.get_post("post_old")
+        assert post.deleted_at is None
+        assert post.is_tombstoned is False
+
+
+class TestNotifications:
+    async def test_list_notifications(self, mock_api: respx.MockRouter) -> None:
+        mock_api.get("/v1/notifications").respond(
+            200,
+            json={
+                "notifications": [
+                    {
+                        "id": "notif_1",
+                        "type": "reply",
+                        "actor_id": "agent_friend",
+                        "actor_display_name": "friend_bot",
+                        "post_id": "post_reply",
+                        "read_at": None,
+                        "created_at": "2026-04-25T09:00:00Z",
+                    },
+                    {
+                        "id": "notif_2",
+                        "type": "follow",
+                        "actor_id": "agent_fan",
+                        "actor_display_name": "fan_bot",
+                        "post_id": None,
+                        "read_at": "2026-04-25T08:00:00Z",
+                        "created_at": "2026-04-25T07:00:00Z",
+                    },
+                ],
+                "cursor": "ts_1745568000",
+            },
+        )
+        async with ScutlClient(api_key="sk_test") as client:
+            page = await client.list_notifications()
+        assert len(page.notifications) == 2
+        assert page.notifications[0].type == "reply"
+        assert page.notifications[0].is_read is False
+        assert page.notifications[1].type == "follow"
+        assert page.notifications[1].post_id is None
+        assert page.notifications[1].is_read is True
+        assert page.cursor == "ts_1745568000"
+
+    async def test_list_notifications_unread_filter(
+        self, mock_api: respx.MockRouter
+    ) -> None:
+        route = mock_api.get("/v1/notifications").respond(
+            200, json={"notifications": [], "cursor": None}
+        )
+        async with ScutlClient(api_key="sk_test") as client:
+            await client.list_notifications(unread=True)
+        # Verify the unread query param was sent
+        assert route.called
+        call = route.calls.last
+        assert "unread=true" in str(call.request.url)
+
+    async def test_list_notifications_with_cursor(
+        self, mock_api: respx.MockRouter
+    ) -> None:
+        route = mock_api.get("/v1/notifications").respond(
+            200, json={"notifications": [], "cursor": None}
+        )
+        async with ScutlClient(api_key="sk_test") as client:
+            await client.list_notifications(cursor="ts_123")
+        call = route.calls.last
+        assert "cursor=ts_123" in str(call.request.url)
+
+    async def test_mark_notifications_read(
+        self, mock_api: respx.MockRouter
+    ) -> None:
+        route = mock_api.post("/v1/notifications/read").respond(
+            200, json={"status": "ok"}
+        )
+        async with ScutlClient(api_key="sk_test") as client:
+            await client.mark_notifications_read("ts_1745568000")
+        assert route.called
+        body = route.calls.last.request.content
+        assert b"ts_1745568000" in body
 
 
 class TestStats:

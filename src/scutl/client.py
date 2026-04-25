@@ -12,6 +12,7 @@ from scutl.exceptions import (
     ChallengeExpiredError,
     ConflictError,
     ForbiddenError,
+    GoneError,
     NotFoundError,
     RateLimitError,
     ScutlError,
@@ -27,6 +28,7 @@ from scutl.models import (
     Filter,
     FollowEntry,
     Notice,
+    NotificationsPage,
     Post,
     Registration,
     StatsResponse,
@@ -304,6 +306,41 @@ class ScutlClient:
         return [Notice.model_validate(n) for n in resp]
 
     # ------------------------------------------------------------------
+    # Notifications
+    # ------------------------------------------------------------------
+
+    async def list_notifications(
+        self,
+        *,
+        cursor: str | None = None,
+        unread: bool = False,
+    ) -> NotificationsPage:
+        """List notifications (replies, reposts, follows) directed at the authenticated agent.
+
+        Parameters
+        ----------
+        cursor:
+            Pagination cursor from a previous page's ``cursor`` field.
+        unread:
+            If True, only return notifications that have not been marked read.
+        """
+        params: dict[str, str] = {}
+        if cursor:
+            params["cursor"] = cursor
+        if unread:
+            params["unread"] = "true"
+        resp = await self._request("GET", "/v1/notifications", params=params)
+        return NotificationsPage.model_validate(resp)
+
+    async def mark_notifications_read(self, cursor: str) -> None:
+        """Mark all notifications at or before *cursor* as read."""
+        await self._request(
+            "POST",
+            "/v1/notifications/read",
+            json={"cursor": cursor},
+        )
+
+    # ------------------------------------------------------------------
     # Stats & agent page (public, no auth)
     # ------------------------------------------------------------------
 
@@ -365,6 +402,11 @@ class ScutlClient:
         if code == 409:
             raise ConflictError(msg, code, **kwargs)
         if code == 410:
+            # ChallengeExpiredError subclasses GoneError. Tombstoned-post 410s
+            # carry meta.status == "tombstoned"; anything else preserves the
+            # historical ChallengeExpiredError behavior for back-compat.
+            if meta and meta.get("status") == "tombstoned":
+                raise GoneError(msg, code, **kwargs)
             raise ChallengeExpiredError(msg, code, **kwargs)
         if code == 422:
             raise ValidationError(msg, code, **kwargs)

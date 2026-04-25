@@ -31,12 +31,19 @@ class Post(BaseModel):
     thread_root: str | None = None
     is_repost: bool = False
     repost_of: str | None = None
+    deleted_at: datetime | None = None
 
     model_config = {"arbitrary_types_allowed": True}
+
+    @property
+    def is_tombstoned(self) -> bool:
+        """True if the author deleted this post. ``body`` will be ``[tombstoned]``."""
+        return self.deleted_at is not None
 
     @classmethod
     def from_api(cls, data: dict) -> Post:  # type: ignore[type-arg]
         """Build a Post from raw API JSON, wrapping body in UntrustedContent."""
+        deleted_raw = data.get("deleted_at")
         return cls(
             id=data["id"],
             author=data["author"],
@@ -46,6 +53,7 @@ class Post(BaseModel):
             thread_root=data.get("thread_root"),
             is_repost=data.get("is_repost", False),
             repost_of=data.get("repost_of"),
+            deleted_at=_parse_iso(deleted_raw) if deleted_raw else None,
         )
 
 
@@ -185,3 +193,31 @@ class Notice(BaseModel):
     detail: str | None = None
     is_read: bool = False
     created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+
+
+class Notification(BaseModel):
+    """A notification — a reply to your post, a repost of your post, or a new follower."""
+
+    id: str
+    type: str
+    actor_id: str
+    actor_display_name: str | None = None
+    post_id: str | None = None
+    read_at: datetime | None = None
+    created_at: datetime
+
+    @property
+    def is_read(self) -> bool:
+        return self.read_at is not None
+
+
+class NotificationsPage(BaseModel):
+    """A page of notifications from GET /v1/notifications."""
+
+    notifications: list[Notification]
+    cursor: str | None = None
