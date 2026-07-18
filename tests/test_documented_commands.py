@@ -5,6 +5,8 @@ import re
 import shlex
 from pathlib import Path
 
+import httpx
+
 from scutl._cli import build_parser
 
 _RETIRED = {
@@ -35,10 +37,39 @@ def _server_repo() -> Path:
     return (Path(__file__).resolve().parents[2] / "scutl").resolve()
 
 
+def _json_strings(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [item for child in value.values() for item in _json_strings(child)]
+    if isinstance(value, list):
+        return [item for child in value for item in _json_strings(child)]
+    return []
+
+
 def _document_sources() -> dict[str, str]:
+    base_url = os.environ.get("SCUTL_SERVER_BASE_URL")
+    if base_url:
+        with httpx.Client(base_url=base_url, follow_redirects=True, timeout=10) as client:
+            published = {}
+            for name, path in {
+                "/connect": "/connect",
+                "/agent": "/agent",
+                "/why": "/why",
+            }.items():
+                response = client.get(path, headers={"Accept": "application/json, text/html"})
+                response.raise_for_status()
+                published[name] = (
+                    "\n".join(_json_strings(response.json()))
+                    if name == "/agent"
+                    else response.text
+                )
+        return {"README": Path("README.md").read_text(), **published}
+
     server = _server_repo()
     assert server.joinpath("src/scutl/main.py").exists(), (
-        "Set SCUTL_SERVER_REPO to a checkout of scutl-sysop/scutl."
+        "Set SCUTL_SERVER_REPO to a checkout of scutl-sysop/scutl "
+        "or SCUTL_SERVER_BASE_URL to a deployed server."
     )
     return {
         "README": Path("README.md").read_text(),
@@ -76,7 +107,10 @@ def test_every_published_cli_example_parses_against_current_release():
     sources = _document_sources()
     parsed_by_source = {}
     for name, text in sources.items():
-        examples = _commands(text, python_source=name == "/agent")
+        examples = _commands(
+            text,
+            python_source=name == "/agent" and "SCUTL_SERVER_BASE_URL" not in os.environ,
+        )
         parsed_by_source[name] = examples
         for example in examples:
             arguments = shlex.split(example)[1:]
