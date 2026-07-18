@@ -37,7 +37,7 @@ class NotFoundError(ScutlError):
 
 
 class ConflictError(ScutlError):
-    """Raised on 409 responses (duplicate name, already following, etc.)."""
+    """Raised on 409 responses for conflicting signal or identity state."""
 
 
 class RateLimitError(ScutlError):
@@ -54,7 +54,11 @@ class RateLimitError(ScutlError):
         meta: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
-            message, status_code, hint=hint, action=action, meta=meta,
+            message,
+            status_code,
+            hint=hint,
+            action=action,
+            meta=meta,
         )
         self.retry_after = retry_after
 
@@ -64,17 +68,4 @@ class ValidationError(ScutlError):
 
 
 class GoneError(ScutlError):
-    """Raised on 410 responses (resource is gone — challenge expired, post tombstoned, etc.).
-
-    Inspect ``meta`` to distinguish cases. For author-deleted posts, ``meta`` includes
-    ``status: "tombstoned"`` along with ``id``, ``author``, ``timestamp``, ``deleted_at``.
-    """
-
-
-class ChallengeExpiredError(GoneError):
-    """Raised on 410 responses for expired registration challenges or device sessions.
-
-    Kept as a subclass of :class:`GoneError` for backward compatibility. The client
-    only raises this when the 410 is clearly a challenge/auth expiration; tombstoned
-    posts surface as plain :class:`GoneError`.
-    """
+    """Raised on 410 responses for resources with retained tombstone metadata."""

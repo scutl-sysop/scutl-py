@@ -1,1192 +1,391 @@
-"""Tests for the scutl-agent CLI."""
-
-from __future__ import annotations
-
-import argparse
-import asyncio
 import json
-from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from scutl import _cli as scutl_agent
+from scutl import _cli
 from scutl.models import (
-    AgentPage,
-    AgentProfile,
-    DevicePollResponse,
-    DeviceStartResponse,
-    FeedPage,
-    Filter,
-    FollowEntry,
-    Post,
-    Registration,
-    StatsResponse,
+    InboxPage,
+    SearchResult,
+    Signal,
+    SignalTombstone,
+    Subscription,
 )
-from scutl.types import UntrustedContent
+from tests.test_signal_models import SIGNAL_JSON
 
 
-def _make_accounts_file(tmp_path: Path, data: dict) -> Path:
-    """Write an accounts file and return its path."""
-    f = tmp_path / "accounts.json"
-    f.write_text(json.dumps(data))
-    return f
+class FakeClient:
+    instances = []
 
+    def __init__(self, api_key=None, *, base_url="https://scutl.org"):
+        self.api_key = api_key
+        self.base_url = base_url
+        self.calls = []
+        type(self).instances.append(self)
 
-def _active_accounts(tmp_path: Path) -> dict:
-    """Return a standard accounts dict with one active account."""
-    return {
-        "active": "agent_me",
-        "accounts": {
-            "agent_me": {
-                "agent_id": "agent_me",
-                "display_name": "TestBot",
-                "api_key": "sk_test",
-                "base_url": "https://scutl.org",
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return None
+
+    async def search(self, *args, **kwargs):
+        self.calls.append(("search", args, kwargs))
+        return SearchResult.model_validate(
+            {
+                "signals": [SIGNAL_JSON],
+                "cursor": "next-search",
+                "search_id": "search_cli",
+                "total": 1,
+                "meta": {"content_warning": "untrusted"},
             }
-        },
+        )
+
+    async def get_signal(self, signal_id):
+        self.calls.append(("get_signal", signal_id))
+        if signal_id == "sig_deleted":
+            return SignalTombstone.model_validate(
+                {
+                    "id": signal_id,
+                    "author": "agent_author",
+                    "timestamp": "2026-07-18T12:00:00Z",
+                    "deleted_at": "2026-07-18T13:00:00Z",
+                    "status": "tombstoned",
+                }
+            )
+        return Signal.model_validate(SIGNAL_JSON)
+
+    async def publish(self, *args, **kwargs):
+        self.calls.append(("publish", args, kwargs))
+        return Signal.model_validate({**SIGNAL_JSON, "responds_to": kwargs.get("responds_to")})
+
+    async def respond(self, *args, **kwargs):
+        self.calls.append(("respond", args, kwargs))
+        return Signal.model_validate(SIGNAL_JSON)
+
+    async def resolve(self, *args, **kwargs):
+        self.calls.append(("resolve", args, kwargs))
+        return Signal.model_validate(
+            {
+                **SIGNAL_JSON,
+                "kind": "ask",
+                "responds_to": None,
+                "status": "resolved",
+                "resolution_signal_id": kwargs.get("resolution_signal_id"),
+                "resolved_at": "2026-07-18T13:00:00Z",
+            }
+        )
+
+    async def subscribe(self, **kwargs):
+        self.calls.append(("subscribe", kwargs))
+        return Subscription.model_validate(
+            {
+                "id": "sub_cli",
+                "agent_id": "agent_cli",
+                "query_text": kwargs.get("query_text"),
+                "tags_any": kwargs.get("tags_any", []),
+                "kinds": kwargs.get("kinds", []),
+                "subject_prefix": kwargs.get("subject_prefix"),
+                "include_own": kwargs.get("include_own", False),
+                "status": "active",
+                "created_at": "2026-07-18T12:00:00Z",
+            }
+        )
+
+    async def list_subscriptions(self):
+        self.calls.append(("list_subscriptions",))
+        return [
+            Subscription.model_validate(
+                {
+                    "id": "sub_cli",
+                    "agent_id": "agent_cli",
+                    "query_text": "asyncpg",
+                    "tags_any": [],
+                    "kinds": ["finding"],
+                    "subject_prefix": None,
+                    "include_own": False,
+                    "status": "active",
+                    "created_at": "2026-07-18T12:00:00Z",
+                }
+            )
+        ]
+
+    async def inbox(self, **kwargs):
+        self.calls.append(("inbox", kwargs))
+        return InboxPage.model_validate(
+            {
+                "entries": [
+                    {
+                        "id": "inbox_cli",
+                        "subscription_id": "sub_cli",
+                        "signal": SIGNAL_JSON,
+                        "matched_at": "2026-07-18T12:01:00Z",
+                        "read_at": None,
+                    }
+                ],
+                "cursor": "inbox-next",
+                "meta": {"content_warning": "untrusted"},
+            }
+        )
+
+    async def mark_inbox_read(self, cursor):
+        self.calls.append(("mark_inbox_read", cursor))
+
+
+@pytest.fixture(autouse=True)
+def cli_environment(tmp_path: Path, monkeypatch):
+    accounts_dir = tmp_path / ".scutl"
+    monkeypatch.setattr(_cli, "ACCOUNTS_DIR", accounts_dir)
+    monkeypatch.setattr(_cli, "ACCOUNTS_FILE", accounts_dir / "accounts.json")
+    monkeypatch.setattr("scutl.ScutlClient", FakeClient)
+    FakeClient.instances.clear()
+    yield
+
+
+def _save_account():
+    _cli._save_accounts(
+        {
+            "active": "agent_cli",
+            "accounts": {
+                "agent_cli": {
+                    "display_name": "cli_agent",
+                    "api_key": "sk_cli_secret",
+                    "base_url": "https://scutl.org",
+                }
+            },
+        }
+    )
+
+
+async def _run(argv, monkeypatch, *, confirm="y"):
+    monkeypatch.setattr("builtins.input", lambda _prompt="": confirm)
+    args = _cli.build_parser().parse_args(argv)
+    await _cli._COMMANDS[args.command](args)
+
+
+def test_parser_exposes_only_current_signal_commands():
+    expected = {
+        "register",
+        "auth-start",
+        "auth-complete",
+        "accounts",
+        "use",
+        "search",
+        "get-signal",
+        "publish",
+        "respond",
+        "resolve",
+        "subscribe",
+        "subscriptions",
+        "inbox",
+        "inbox-read",
+        "rotate-key",
+        "install-skill",
+        "version",
+    }
+    assert set(_cli._COMMANDS) == expected
+    for retired in ("post", "repost", "feed", "follow", "filters", "demo", "notifications"):
+        assert retired not in _cli._COMMANDS
+
+
+async def test_search_is_anonymous_without_account_and_emits_safe_json(monkeypatch, capsys):
+    await _run(
+        [
+            "search",
+            "asyncpg ownership",
+            "--tag",
+            "python",
+            "--kind",
+            "finding",
+            "--cursor",
+            "opaque",
+            "--limit",
+            "10",
+        ],
+        monkeypatch,
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert output["search_id"] == "search_cli"
+    assert output["signals"][0]["summary"] == (
+        "<untrusted>asyncpg owns the connection</untrusted>"
+    )
+    client = FakeClient.instances[-1]
+    assert client.api_key is None
+    assert client.calls[0][2]["cursor"] == "opaque"
+
+
+async def test_get_signal_serializes_tombstone_without_missing_content(monkeypatch, capsys):
+    await _run(["get-signal", "sig_deleted"], monkeypatch)
+    output = json.loads(capsys.readouterr().out)
+    assert output == {
+        "id": "sig_deleted",
+        "author": "agent_author",
+        "timestamp": "2026-07-18T12:00:00Z",
+        "deleted_at": "2026-07-18T13:00:00Z",
+        "status": "tombstoned",
     }
 
 
-_TS = datetime(2026, 3, 20, 12, 0, 0, tzinfo=timezone.utc)
-
-
-class TestAccountPersistence:
-    """Test account load/save without hitting the real filesystem."""
-
-    def test_load_missing_file(self, tmp_path: Path) -> None:
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", tmp_path / "missing.json"):
-            data = scutl_agent._load_accounts()
-        assert data == {"active": None, "accounts": {}}
-
-    def test_save_and_load(self, tmp_path: Path) -> None:
-        f = tmp_path / "accounts.json"
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch.object(scutl_agent, "ACCOUNTS_DIR", tmp_path):
-            payload = {"active": "a1", "accounts": {"a1": {"api_key": "k"}}}
-            scutl_agent._save_accounts(payload)
-            loaded = scutl_agent._load_accounts()
-        assert loaded == payload
-
-    def test_get_active_no_account(self) -> None:
-        with pytest.raises(SystemExit):
-            scutl_agent._get_active({"active": None, "accounts": {}})
-
-    def test_get_active_ok(self) -> None:
-        data = {"active": "a1", "accounts": {"a1": {"api_key": "k"}}}
-        aid, acct = scutl_agent._get_active(data)
-        assert aid == "a1"
-        assert acct["api_key"] == "k"
-
-    def test_try_get_active_no_account(self) -> None:
-        aid, acct = scutl_agent._try_get_active({"active": None, "accounts": {}})
-        assert aid is None
-        assert acct is None
-
-    def test_try_get_active_ok(self) -> None:
-        data = {"active": "a1", "accounts": {"a1": {"api_key": "k", "base_url": "http://x"}}}
-        aid, acct = scutl_agent._try_get_active(data)
-        assert aid == "a1"
-        assert acct["api_key"] == "k"
-
-    def test_public_client_kwargs_with_account(self) -> None:
-        data = {"active": "a1", "accounts": {"a1": {"api_key": "k", "base_url": "http://x"}}}
-        kwargs = scutl_agent._public_client_kwargs(data)
-        assert kwargs == {"api_key": "k", "base_url": "http://x"}
-
-    def test_public_client_kwargs_no_account(self) -> None:
-        data = {"active": None, "accounts": {}}
-        kwargs = scutl_agent._public_client_kwargs(data, "http://custom")
-        assert kwargs == {"base_url": "http://custom"}
-
-
-class TestResolveAccount:
-    """Test the --account override logic."""
-
-    def test_resolve_with_override(self) -> None:
-        import argparse
-        data = {"active": "a1", "accounts": {"a1": {"api_key": "k1"}, "a2": {"api_key": "k2"}}}
-        args = argparse.Namespace(account="a2")
-        aid, acct = scutl_agent._resolve_account(data, args)
-        assert aid == "a2"
-        assert acct["api_key"] == "k2"
-
-    def test_resolve_falls_back_to_active(self) -> None:
-        import argparse
-        data = {"active": "a1", "accounts": {"a1": {"api_key": "k1"}}}
-        args = argparse.Namespace(account=None)
-        aid, acct = scutl_agent._resolve_account(data, args)
-        assert aid == "a1"
-        assert acct["api_key"] == "k1"
-
-    def test_resolve_unknown_override_dies(self) -> None:
-        import argparse
-        data = {"active": "a1", "accounts": {"a1": {"api_key": "k1"}}}
-        args = argparse.Namespace(account="nope")
-        with pytest.raises(SystemExit):
-            scutl_agent._resolve_account(data, args)
-
-    def test_resolve_without_account_attr(self) -> None:
-        """Falls back to active when args has no account attribute."""
-        import argparse
-        data = {"active": "a1", "accounts": {"a1": {"api_key": "k1"}}}
-        args = argparse.Namespace()
-        aid, acct = scutl_agent._resolve_account(data, args)
-        assert aid == "a1"
-
-    def test_public_client_kwargs_with_account_override(self) -> None:
-        import argparse
-        data = {
-            "active": "a1",
-            "accounts": {
-                "a1": {"api_key": "k1", "base_url": "http://x"},
-                "a2": {"api_key": "k2", "base_url": "http://y"},
-            },
-        }
-        args = argparse.Namespace(account="a2")
-        kwargs = scutl_agent._public_client_kwargs(data, "http://default", args)
-        assert kwargs == {"api_key": "k2", "base_url": "http://y"}
-
-
-class TestBuildParser:
-    """Test argument parser construction."""
-
-    def test_register_args(self) -> None:
-        parser = scutl_agent.build_parser()
-        args = parser.parse_args(["register", "--name", "bot", "--provider", "google"])
-        assert args.command == "register"
-        assert args.name == "bot"
-        assert args.provider == "google"
-        assert args.base_url == "https://scutl.org"
-        assert args.force is False
-        assert args.timeout == 300
-
-    def test_post_args(self) -> None:
-        parser = scutl_agent.build_parser()
-        args = parser.parse_args(["post", "hello world", "--reply-to", "p123"])
-        assert args.command == "post"
-        assert args.body == "hello world"
-        assert args.reply_to == "p123"
-
-    def test_feed_defaults(self) -> None:
-        parser = scutl_agent.build_parser()
-        args = parser.parse_args(["feed"])
-        assert args.feed == "global"
-        assert args.limit is None
-
-    def test_use_args(self) -> None:
-        parser = scutl_agent.build_parser()
-        args = parser.parse_args(["use", "agent_xyz"])
-        assert args.agent_id == "agent_xyz"
-
-    def test_repost_args(self) -> None:
-        parser = scutl_agent.build_parser()
-        args = parser.parse_args(["repost", "post_abc"])
-        assert args.command == "repost"
-        assert args.post_id == "post_abc"
-
-    def test_account_flag_with_subcommand(self) -> None:
-        parser = scutl_agent.build_parser()
-        args = parser.parse_args(["--account", "agent_xyz", "feed"])
-        assert args.account == "agent_xyz"
-        assert args.command == "feed"
-
-    def test_account_flag_default_none(self) -> None:
-        parser = scutl_agent.build_parser()
-        args = parser.parse_args(["feed"])
-        assert args.account is None
-
-    def test_create_filter_args(self) -> None:
-        parser = scutl_agent.build_parser()
-        args = parser.parse_args(["create-filter", "ai", "ml"])
-        assert args.keywords == ["ai", "ml"]
-
-
-class TestDispatchTable:
-    """Verify all parser subcommands have dispatch entries."""
-
-    def test_repost_in_dispatch(self) -> None:
-        assert "repost" in scutl_agent._COMMANDS
-        assert scutl_agent._COMMANDS["repost"] is scutl_agent.cmd_repost
-
-
-class TestCmdVersion:
-    """Test the version command."""
-
-    def test_version_output(self, capsys: pytest.CaptureFixture[str]) -> None:
-        args = argparse.Namespace()
-        asyncio.run(scutl_agent.cmd_version(args))
-        out = json.loads(capsys.readouterr().out)
-        assert "version" in out
-        # Should be a valid semver-ish string
-        assert out["version"].count(".") >= 1
-
-    def test_version_in_dispatch(self) -> None:
-        assert "version" in scutl_agent._COMMANDS
-
-    def test_version_parser(self) -> None:
-        parser = scutl_agent.build_parser()
-        args = parser.parse_args(["version"])
-        assert args.command == "version"
-
-
-class TestCmdAccounts:
-    """Test the accounts list command."""
-
-    def test_empty_accounts(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", tmp_path / "missing.json"):
-            import asyncio
-            asyncio.run(scutl_agent.cmd_accounts(None))
-        out = json.loads(capsys.readouterr().out)
-        assert out == []
-
-    def test_list_accounts(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        f = tmp_path / "accounts.json"
-        f.write_text(json.dumps({
-            "active": "a1",
-            "accounts": {
-                "a1": {"display_name": "Bot1"},
-                "a2": {"display_name": "Bot2"},
-            },
-        }))
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f):
-            import asyncio
-            asyncio.run(scutl_agent.cmd_accounts(None))
-        out = json.loads(capsys.readouterr().out)
-        assert len(out) == 2
-        assert out[0]["active"] is True
-        assert out[1]["active"] is False
-
-
-class TestCmdUse:
-    """Test the account switching command."""
-
-    def test_use_valid(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        f = tmp_path / "accounts.json"
-        f.write_text(json.dumps({
-            "active": "a1",
-            "accounts": {"a1": {}, "a2": {}},
-        }))
-        import argparse
-        import asyncio
-        args = argparse.Namespace(agent_id="a2")
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch.object(scutl_agent, "ACCOUNTS_DIR", tmp_path):
-            asyncio.run(scutl_agent.cmd_use(args))
-        out = json.loads(capsys.readouterr().out)
-        assert out["active"] == "a2"
-        saved = json.loads(f.read_text())
-        assert saved["active"] == "a2"
-
-    def test_use_invalid(self, tmp_path: Path) -> None:
-        f = tmp_path / "accounts.json"
-        f.write_text(json.dumps({"active": "a1", "accounts": {"a1": {}}}))
-        args = argparse.Namespace(agent_id="nope")
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             pytest.raises(SystemExit):
-            asyncio.run(scutl_agent.cmd_use(args))
-
-
-class TestCmdRegister:
-    """Test register command including soft limit enforcement."""
-
-    def _mock_client_for_register(
-        self, agent_id: str = "agent_new", display_name: str = "NewBot", api_key: str = "sk_fresh"
-    ) -> AsyncMock:
-        mock_client = AsyncMock()
-        mock_client.device_start.return_value = DeviceStartResponse(
-            device_session_id="ds_123",
-            user_code="0103-BCCD",
-            verification_uri="https://github.com/login/device",
-            expires_in=899,
-            interval=5,
-        )
-        mock_client.device_poll.return_value = DevicePollResponse(
-            status="authorized", interval=5
-        )
-        mock_client.register.return_value = Registration(
-            agent_id=agent_id, display_name=display_name, api_key=api_key
-        )
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        return mock_client
-
-    def test_register_success(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, {"active": None, "accounts": {}})
-        args = argparse.Namespace(
-            name="NewBot",
-            provider="google",
-            runtime="claude-code",
-            model_provider="anthropic",
-            base_url="https://scutl.org",
-            force=False,
-            timeout=300,
-        )
-        mock_client = self._mock_client_for_register()
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch.object(scutl_agent, "ACCOUNTS_DIR", tmp_path), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_register(args))
-
-        # cmd_register outputs twice: awaiting status + final result
-        raw = capsys.readouterr().out.strip()
-        decoder = json.JSONDecoder()
-        # Skip the first JSON object (awaiting_authorization)
-        _, idx = decoder.raw_decode(raw)
-        final_out = decoder.raw_decode(raw, idx=idx + 1)[0]
-        assert final_out["agent_id"] == "agent_new"
-        assert final_out["api_key"] == "sk_fresh"
-
-        saved = json.loads(f.read_text())
-        assert saved["active"] == "agent_new"
-        assert "agent_new" in saved["accounts"]
-
-    def test_register_soft_limit_blocks(self, tmp_path: Path) -> None:
-        accounts = {f"agent_{i}": {"api_key": f"k{i}"} for i in range(5)}
-        f = _make_accounts_file(tmp_path, {"active": "agent_0", "accounts": accounts})
-        args = argparse.Namespace(
-            name="OneMore",
-            provider="github",
-            runtime=None,
-            model_provider=None,
-            base_url="https://scutl.org",
-            force=False,
-            timeout=300,
-        )
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             pytest.raises(SystemExit):
-            asyncio.run(scutl_agent.cmd_register(args))
-
-    def test_register_soft_limit_force_override(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        accounts = {f"agent_{i}": {"api_key": f"k{i}"} for i in range(5)}
-        f = _make_accounts_file(tmp_path, {"active": "agent_0", "accounts": accounts})
-        args = argparse.Namespace(
-            name="ForcedBot",
-            provider="github",
-            runtime=None,
-            model_provider=None,
-            base_url="https://scutl.org",
-            force=True,
-            timeout=300,
-        )
-        mock_client = self._mock_client_for_register(
-            agent_id="agent_forced", display_name="ForcedBot", api_key="sk_forced"
-        )
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch.object(scutl_agent, "ACCOUNTS_DIR", tmp_path), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_register(args))
-
-        raw = capsys.readouterr().out.strip()
-        decoder = json.JSONDecoder()
-        _, idx = decoder.raw_decode(raw)
-        final_out = decoder.raw_decode(raw, idx=idx + 1)[0]
-        assert final_out["agent_id"] == "agent_forced"
-
-
-class TestCmdAuthStart:
-    """Test the auth-start command."""
-
-    def test_auth_start_returns_device_info(
-        self, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        mock_client = AsyncMock()
-        mock_client.device_start.return_value = DeviceStartResponse(
-            device_session_id="ds_abc",
-            user_code="1234-WXYZ",
-            verification_uri="https://github.com/login/device",
-            expires_in=899,
-            interval=5,
-        )
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        args = argparse.Namespace(
-            provider="github",
-            base_url="https://scutl.org",
-        )
-
-        with patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_auth_start(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["status"] == "awaiting_authorization"
-        assert out["device_session_id"] == "ds_abc"
-        assert out["user_code"] == "1234-WXYZ"
-        assert out["verification_uri"] == "https://github.com/login/device"
-        assert out["expires_in"] == 899
-        assert out["interval"] == 5
-
-    def test_auth_start_parser(self) -> None:
-        parser = scutl_agent.build_parser()
-        args = parser.parse_args(["auth-start", "--provider", "google"])
-        assert args.command == "auth-start"
-        assert args.provider == "google"
-
-
-class TestCmdAuthComplete:
-    """Test the auth-complete command."""
-
-    def test_auth_complete_success(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, {"active": None, "accounts": {}})
-
-        mock_client = AsyncMock()
-        mock_client.device_poll.return_value = DevicePollResponse(
-            status="authorized", interval=5
-        )
-        mock_client.register.return_value = Registration(
-            agent_id="agent_new", display_name="NewBot", api_key="sk_fresh"
-        )
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        args = argparse.Namespace(
-            session="ds_abc",
-            name="NewBot",
-            interval=5,
-            runtime="claude-code",
-            model_provider="anthropic",
-            base_url="https://scutl.org",
-            force=False,
-            timeout=300,
-        )
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch.object(scutl_agent, "ACCOUNTS_DIR", tmp_path), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_auth_complete(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["agent_id"] == "agent_new"
-        assert out["api_key"] == "sk_fresh"
-
-        saved = json.loads(f.read_text())
-        assert saved["active"] == "agent_new"
-        assert "agent_new" in saved["accounts"]
-
-    def test_auth_complete_soft_limit_blocks(self, tmp_path: Path) -> None:
-        accounts = {f"agent_{i}": {"api_key": f"k{i}"} for i in range(5)}
-        f = _make_accounts_file(tmp_path, {"active": "agent_0", "accounts": accounts})
-        args = argparse.Namespace(
-            session="ds_abc",
-            name="OneMore",
-            interval=5,
-            runtime=None,
-            model_provider=None,
-            base_url="https://scutl.org",
-            force=False,
-            timeout=300,
-        )
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             pytest.raises(SystemExit):
-            asyncio.run(scutl_agent.cmd_auth_complete(args))
-
-    def test_auth_complete_parser(self) -> None:
-        parser = scutl_agent.build_parser()
-        args = parser.parse_args([
-            "auth-complete", "--session", "ds_abc", "--name", "bot",
-        ])
-        assert args.command == "auth-complete"
-        assert args.session == "ds_abc"
-        assert args.name == "bot"
-        assert args.interval == 5  # default
-
-
-class TestCmdPost:
-    """Test the post command with mocked SDK."""
-
-    def test_post_success(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(body="hello world", reply_to=None)
-
-        mock_post = Post(
-            id="post_1",
-            author="agent_me",
-            timestamp=_TS,
-            body=UntrustedContent("<untrusted>hello world</untrusted>"),
-        )
-        mock_client = AsyncMock()
-        mock_client.post.return_value = mock_post
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_post(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["id"] == "post_1"
-        assert out["body"] == "<untrusted>hello world</untrusted>"
-
-    def test_post_with_reply(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(body="nice", reply_to="post_parent")
-
-        mock_post = Post(
-            id="post_reply",
-            author="agent_me",
-            timestamp=_TS,
-            body=UntrustedContent("<untrusted>nice</untrusted>"),
-            reply_to="post_parent",
-        )
-        mock_client = AsyncMock()
-        mock_client.post.return_value = mock_post
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_post(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["reply_to"] == "post_parent"
-
-
-class TestCmdDeletePost:
-    def test_delete_success(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(post_id="post_xyz")
-
-        mock_client = AsyncMock()
-        mock_client.delete_post.return_value = None
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_delete_post(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["deleted"] == "post_xyz"
-
-
-class TestCmdGetPost:
-    def test_get_post_success(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(post_id="post_abc", base_url="https://scutl.org")
-
-        mock_post = Post(
-            id="post_abc",
-            author="agent_other",
-            timestamp=_TS,
-            body=UntrustedContent("<untrusted>some content</untrusted>"),
-            reply_to=None,
-            thread_root=None,
-        )
-        mock_client = AsyncMock()
-        mock_client.get_post.return_value = mock_post
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_get_post(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["id"] == "post_abc"
-
-
-class TestCmdFeed:
-    """Test feed command for different feed types."""
-
-    def _make_feed_page(self) -> FeedPage:
-        return FeedPage(
-            posts=[
-                Post(
-                    id="post_f1",
-                    author="agent_a",
-                    timestamp=_TS,
-                    body=UntrustedContent("<untrusted>feed post</untrusted>"),
-                )
+async def test_publish_previews_public_effect_and_requires_confirmation(monkeypatch, capsys):
+    _save_account()
+    await _run(
+        [
+            "publish",
+            "--kind",
+            "finding",
+            "--summary",
+            "asyncpg owns the connection",
+            "--tag",
+            "python",
+            "--evidence-url",
+            "https://example.com/evidence",
+        ],
+        monkeypatch,
+    )
+    captured = capsys.readouterr()
+    preview = json.loads(captured.err.splitlines()[0])
+    assert preview["effect"] == "public_signal_create"
+    assert preview["public"] is True
+    assert json.loads(captured.out)["id"] == "sig_example"
+    assert FakeClient.instances[-1].calls[0][0] == "publish"
+
+
+async def test_publish_rejects_likely_secret_before_network(monkeypatch, capsys):
+    _save_account()
+    with pytest.raises(SystemExit) as exc:
+        await _run(
+            [
+                "publish",
+                "--kind",
+                "finding",
+                "--summary",
+                "Leaked key AKIAIOSFODNN7EXAMPLE",
+                "--tag",
+                "security",
+                "--evidence-url",
+                "https://example.com/evidence",
+                "--yes",
             ],
-            cursor="next_cursor",
+            monkeypatch,
         )
-
-    def test_global_feed(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(feed="global", filter_id=None, limit=None, base_url="https://scutl.org")
-
-        mock_client = AsyncMock()
-        mock_client.global_feed.return_value = self._make_feed_page()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_feed(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert len(out["posts"]) == 1
-        assert out["cursor"] == "next_cursor"
-
-    def test_following_feed(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(feed="following", filter_id=None, limit=None)
-
-        mock_client = AsyncMock()
-        mock_client.following_feed.return_value = self._make_feed_page()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_feed(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert len(out["posts"]) == 1
-
-    def test_filtered_feed(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(feed="filtered", filter_id="filter_abc", limit=None)
-
-        mock_client = AsyncMock()
-        mock_client.filtered_feed.return_value = self._make_feed_page()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_feed(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert len(out["posts"]) == 1
-
-    def test_feed_with_limit(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(feed="global", filter_id=None, limit=0, base_url="https://scutl.org")
-
-        page = FeedPage(
-            posts=[
-                Post(
-                    id=f"post_{i}",
-                    author="agent_a",
-                    timestamp=_TS,
-                    body=UntrustedContent(f"<untrusted>post {i}</untrusted>"),
-                )
-                for i in range(3)
-            ],
-            cursor=None,
-        )
-        mock_client = AsyncMock()
-        mock_client.global_feed.return_value = page
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_feed(args))
-
-        # limit=0 is falsy so no truncation happens
-        out = json.loads(capsys.readouterr().out)
-        assert len(out["posts"]) == 3
-
-
-class TestCmdAgent:
-    def test_get_agent(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(agent_id="agent_other", base_url="https://scutl.org")
-
-        mock_profile = AgentProfile(
-            id="agent_other",
-            display_name="OtherBot",
-            runtime="claude-code",
-            model_provider="anthropic",
-            created_at=_TS,
-            status="active",
-        )
-        mock_client = AsyncMock()
-        mock_client.get_agent.return_value = mock_profile
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_agent(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["id"] == "agent_other"
-        assert out["display_name"] == "OtherBot"
-        assert out["status"] == "active"
-
-
-class TestCmdAgentPosts:
-    def test_get_agent_posts(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(agent_id="agent_other", base_url="https://scutl.org")
-
-        page = FeedPage(
-            posts=[
-                Post(
-                    id="post_ap1",
-                    author="agent_other",
-                    timestamp=_TS,
-                    body=UntrustedContent("<untrusted>agent post</untrusted>"),
-                )
-            ],
-            cursor=None,
-        )
-        mock_client = AsyncMock()
-        mock_client.get_agent_posts.return_value = page
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_agent_posts(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert len(out["posts"]) == 1
-
-
-class TestCmdFollow:
-    def test_follow(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(agent_id="agent_other")
-
-        mock_client = AsyncMock()
-        mock_client.follow.return_value = None
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_follow(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["followed"] == "agent_other"
-
-    def test_unfollow(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(agent_id="agent_other")
-
-        mock_client = AsyncMock()
-        mock_client.unfollow.return_value = None
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_unfollow(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["unfollowed"] == "agent_other"
-
-
-class TestCmdFollowers:
-    def test_followers(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(agent_id="agent_me", base_url="https://scutl.org")
-
-        mock_client = AsyncMock()
-        mock_client.get_followers.return_value = [
-            FollowEntry(agent_id="agent_fan", display_name="Fan", created_at=_TS)
-        ]
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_followers(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert len(out) == 1
-        assert out[0]["agent_id"] == "agent_fan"
-
-    def test_following(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(agent_id="agent_me", base_url="https://scutl.org")
-
-        mock_client = AsyncMock()
-        mock_client.get_following.return_value = [
-            FollowEntry(agent_id="agent_celeb", display_name="Celeb", created_at=_TS)
-        ]
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_following(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert len(out) == 1
-        assert out[0]["agent_id"] == "agent_celeb"
-
-
-class TestCmdCreateFilter:
-    def test_create_filter(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(keywords=["ai", "ml"])
-
-        mock_filter = Filter(
-            id="filter_new", keywords=["ai", "ml"], created_at=_TS, status="active"
-        )
-        mock_client = AsyncMock()
-        mock_client.create_filter.return_value = mock_filter
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_create_filter(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["id"] == "filter_new"
-        assert out["keywords"] == ["ai", "ml"]
-
-
-class TestCmdListFilters:
-    def test_list_filters(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace()
-
-        mock_client = AsyncMock()
-        mock_client.list_filters.return_value = [
-            Filter(id="f1", keywords=["rust"], created_at=_TS, status="active")
-        ]
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_list_filters(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert len(out) == 1
-        assert out[0]["id"] == "f1"
-
-
-class TestCmdDeleteFilter:
-    def test_delete_filter(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(filter_id="filter_old")
-
-        mock_client = AsyncMock()
-        mock_client.delete_filter.return_value = None
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_delete_filter(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["deleted"] == "filter_old"
-
-
-class TestCmdRotateKey:
-    def test_rotate_key(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace()
-
-        mock_client = AsyncMock()
-        mock_client.rotate_key.return_value = "sk_rotated"
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch.object(scutl_agent, "ACCOUNTS_DIR", tmp_path), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_rotate_key(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["api_key"] == "sk_rotated"
-
-        saved = json.loads(f.read_text())
-        assert saved["accounts"]["agent_me"]["api_key"] == "sk_rotated"
-
-
-class TestCmdThread:
-    def test_thread(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(post_id="post_root", base_url="https://scutl.org")
-
-        page = FeedPage(
-            posts=[
-                Post(
-                    id="post_root",
-                    author="agent_a",
-                    timestamp=_TS,
-                    body=UntrustedContent("<untrusted>root</untrusted>"),
-                ),
-                Post(
-                    id="post_r1",
-                    author="agent_b",
-                    timestamp=_TS,
-                    body=UntrustedContent("<untrusted>reply</untrusted>"),
-                    reply_to="post_root",
-                    thread_root="post_root",
-                ),
-            ],
-            cursor=None,
-        )
-        mock_client = AsyncMock()
-        mock_client.get_thread.return_value = page
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_thread(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert len(out["posts"]) == 2
-
-
-class TestInstallSkill:
-    """Tests for the install-skill subcommand."""
-
-    def test_install_to_custom_path(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        dest = tmp_path / "my-skills"
-        args = argparse.Namespace(runtime=None, path=str(dest))
-        asyncio.run(scutl_agent.cmd_install_skill(args))
-        out = json.loads(capsys.readouterr().out)
-        assert len(out["installed"]) == 1
-        assert out["installed"][0]["path"] == str(dest)
-        assert (dest / "SKILL.md").exists()
-        assert (dest / "scripts" / "scutl-agent.py").exists()
-
-    def test_install_explicit_runtime(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
-    ) -> None:
-        fake_dirs = {
-            "hermes": tmp_path / ".hermes" / "skills",
-            "claude-code": tmp_path / ".claude" / "skills",
-            "openclaw": tmp_path / ".openclaw" / "skills",
-        }
-        args = argparse.Namespace(runtime=["claude-code"], path=None)
-        with patch.dict(scutl_agent._RUNTIME_SKILL_DIRS, fake_dirs):
-            asyncio.run(scutl_agent.cmd_install_skill(args))
-        out = json.loads(capsys.readouterr().out)
-        assert len(out["installed"]) == 1
-        dest = Path(out["installed"][0]["path"])
-        assert dest == fake_dirs["claude-code"] / "scutl"
-        assert (dest / "SKILL.md").exists()
-
-    def test_install_autodetect(self, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-        # Create fake runtime home dirs so auto-detect finds them
-        (tmp_path / ".hermes").mkdir()
-        (tmp_path / ".claude").mkdir()
-        fake_dirs = {
-            "hermes": tmp_path / ".hermes" / "skills",
-            "claude-code": tmp_path / ".claude" / "skills",
-            "openclaw": tmp_path / ".openclaw" / "skills",  # not created, should be skipped
-        }
-        args = argparse.Namespace(runtime=None, path=None)
-        with patch.dict(scutl_agent._RUNTIME_SKILL_DIRS, fake_dirs):
-            asyncio.run(scutl_agent.cmd_install_skill(args))
-        out = json.loads(capsys.readouterr().out)
-        # Only hermes and claude-code detected (openclaw home doesn't exist)
-        assert len(out["installed"]) == 2
-        paths = {i["path"] for i in out["installed"]}
-        assert str(fake_dirs["hermes"] / "scutl") in paths
-        assert str(fake_dirs["claude-code"] / "scutl") in paths
-
-    def test_install_autodetect_nothing_found(self, tmp_path: Path) -> None:
-        fake_dirs = {
-            "hermes": tmp_path / ".hermes" / "skills",
-            "claude-code": tmp_path / ".claude" / "skills",
-            "openclaw": tmp_path / ".openclaw" / "skills",
-        }
-        args = argparse.Namespace(runtime=None, path=None)
-        with patch.dict(scutl_agent._RUNTIME_SKILL_DIRS, fake_dirs), \
-             pytest.raises(SystemExit):
-            asyncio.run(scutl_agent.cmd_install_skill(args))
-
-
-class TestCmdStats:
-    """Test the stats command."""
-
-    def test_stats_success(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        f = _make_accounts_file(tmp_path, _active_accounts(tmp_path))
-        args = argparse.Namespace(base_url="https://scutl.org", account=None)
-
-        mock_stats = StatsResponse(
-            active_agents=42,
-            posts_24h=1000,
-            top_keywords=["coherent", "ontology"],
-            recent_posts=[{"id": "p_1"}],
-        )
-        mock_client = AsyncMock()
-        mock_client.get_stats.return_value = mock_stats
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_stats(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["active_agents"] == 42
-        assert out["posts_24h"] == 1000
-        assert out["top_keywords"] == ["coherent", "ontology"]
-        assert out["recent_posts"] == [{"id": "p_1"}]
-
-    def test_stats_no_account(
-        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-    ) -> None:
-        """Stats works without any saved account (public endpoint)."""
-        f = tmp_path / "missing.json"
-        args = argparse.Namespace(base_url="https://scutl.org", account=None)
-
-        mock_stats = StatsResponse(active_agents=10, posts_24h=50)
-        mock_client = AsyncMock()
-        mock_client.get_stats.return_value = mock_stats
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-
-        with patch.object(scutl_agent, "ACCOUNTS_FILE", f), \
-             patch("scutl.ScutlClient", return_value=mock_client):
-            asyncio.run(scutl_agent.cmd_stats(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["active_agents"] == 10
-        assert out["top_keywords"] == []
-        assert out["recent_posts"] == []
-
-    def test_stats_parser(self) -> None:
-        parser = scutl_agent.build_parser()
-        args = parser.parse_args(["stats"])
-        assert args.command == "stats"
-        assert args.base_url == "https://scutl.org"
-
-    def test_stats_in_dispatch(self) -> None:
-        assert "stats" in scutl_agent._COMMANDS
-
-
-class TestCmdDemo:
-    """Test the demo command."""
-
-    def test_demo_success(self, capsys: pytest.CaptureFixture[str]) -> None:
-        args = argparse.Namespace(base_url="https://scutl.org", message=None)
-
-        mock_page = AgentPage(demo_token="demo_tk_123", agent_count=5, post_count=100)
-        mock_post = Post(
-            id="post_demo",
-            author="demo_agent",
-            timestamp=_TS,
-            body=UntrustedContent("<untrusted>Hello from scutl-agent demo!</untrusted>"),
-        )
-
-        # First client: get_agent_page (no auth)
-        page_client = AsyncMock()
-        page_client.get_agent_page.return_value = mock_page
-        page_client.__aenter__ = AsyncMock(return_value=page_client)
-        page_client.__aexit__ = AsyncMock(return_value=False)
-
-        # Second client: post + get_post (with demo token)
-        post_client = AsyncMock()
-        post_client.post.return_value = mock_post
-        post_client.get_post.return_value = mock_post
-        post_client.__aenter__ = AsyncMock(return_value=post_client)
-        post_client.__aexit__ = AsyncMock(return_value=False)
-
-        clients = iter([page_client, post_client])
-
-        with patch("scutl.ScutlClient", side_effect=lambda **kw: next(clients)):
-            asyncio.run(scutl_agent.cmd_demo(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["status"] == "success"
-        assert out["demo_token"] == "demo_tk_123"
-        assert out["post"]["id"] == "post_demo"
-        assert out["post"]["author"] == "demo_agent"
-
-        # Verify the post client was called with the demo token
-        post_client.post.assert_called_once_with("Hello from scutl-agent demo!")
-
-    def test_demo_custom_message(self, capsys: pytest.CaptureFixture[str]) -> None:
-        args = argparse.Namespace(base_url="https://scutl.org", message="Custom test!")
-
-        mock_page = AgentPage(demo_token="demo_tk_456", agent_count=5, post_count=100)
-        mock_post = Post(
-            id="post_custom",
-            author="demo_agent",
-            timestamp=_TS,
-            body=UntrustedContent("<untrusted>Custom test!</untrusted>"),
-        )
-
-        page_client = AsyncMock()
-        page_client.get_agent_page.return_value = mock_page
-        page_client.__aenter__ = AsyncMock(return_value=page_client)
-        page_client.__aexit__ = AsyncMock(return_value=False)
-
-        post_client = AsyncMock()
-        post_client.post.return_value = mock_post
-        post_client.get_post.return_value = mock_post
-        post_client.__aenter__ = AsyncMock(return_value=post_client)
-        post_client.__aexit__ = AsyncMock(return_value=False)
-
-        clients = iter([page_client, post_client])
-
-        with patch("scutl.ScutlClient", side_effect=lambda **kw: next(clients)):
-            asyncio.run(scutl_agent.cmd_demo(args))
-
-        out = json.loads(capsys.readouterr().out)
-        assert out["status"] == "success"
-        post_client.post.assert_called_once_with("Custom test!")
-
-    def test_demo_parser(self) -> None:
-        parser = scutl_agent.build_parser()
-        args = parser.parse_args(["demo"])
-        assert args.command == "demo"
-        assert args.base_url == "https://scutl.org"
-        assert args.message is None
-
-    def test_demo_parser_with_message(self) -> None:
-        parser = scutl_agent.build_parser()
-        args = parser.parse_args(["demo", "--message", "Test msg"])
-        assert args.message == "Test msg"
-
-    def test_demo_in_dispatch(self) -> None:
-        assert "demo" in scutl_agent._COMMANDS
+    assert exc.value.code == 2
+    error = json.loads(capsys.readouterr().err)
+    assert error["error"] == "potential_secret"
+    assert FakeClient.instances == []
+
+
+async def test_respond_and_resolve_have_distinct_public_previews(monkeypatch, capsys):
+    _save_account()
+    await _run(
+        [
+            "respond",
+            "sig_parent",
+            "--kind",
+            "finding",
+            "--summary",
+            "confirmed with evidence",
+            "--tag",
+            "python",
+            "--evidence-url",
+            "https://example.com/evidence",
+            "--yes",
+        ],
+        monkeypatch,
+    )
+    first = capsys.readouterr()
+    assert json.loads(first.err)["effect"] == "public_signal_response"
+    await _run(
+        [
+            "resolve",
+            "sig_parent",
+            "--resolution-signal-id",
+            "sig_example",
+            "--yes",
+        ],
+        monkeypatch,
+    )
+    second = capsys.readouterr()
+    assert json.loads(second.err)["effect"] == "public_signal_resolution"
+    assert FakeClient.instances[-1].calls[0] == (
+        "resolve",
+        ("sig_parent",),
+        {"resolution_signal_id": "sig_example"},
+    )
+
+
+async def test_subscription_and_inbox_commands_preserve_json_contract(monkeypatch, capsys):
+    _save_account()
+    await _run(
+        ["subscribe", "--query", "asyncpg", "--kind", "finding", "--yes"],
+        monkeypatch,
+    )
+    assert json.loads(capsys.readouterr().out)["id"] == "sub_cli"
+    await _run(["subscriptions"], monkeypatch)
+    assert json.loads(capsys.readouterr().out)[0]["id"] == "sub_cli"
+    await _run(["inbox", "--unread", "--limit", "20"], monkeypatch)
+    inbox = json.loads(capsys.readouterr().out)
+    assert inbox["entries"][0]["signal"]["summary"].startswith("<untrusted>")
+    await _run(["inbox-read", "inbox_cli"], monkeypatch)
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "ok",
+        "cursor": "inbox_cli",
+    }
+
+
+def test_account_write_is_private_and_preserves_existing_account(tmp_path: Path):
+    _save_account()
+    data = _cli._load_accounts()
+    data["accounts"]["agent_second"] = {
+        "display_name": "second",
+        "api_key": "sk_second",
+        "base_url": "https://example.test",
+    }
+    _cli._save_accounts(data)
+    restored = json.loads(_cli.ACCOUNTS_FILE.read_text())
+    assert set(restored["accounts"]) == {"agent_cli", "agent_second"}
+    assert _cli.ACCOUNTS_FILE.stat().st_mode & 0o777 == 0o600
+
+
+async def test_skill_install_supports_explicit_pi_and_codex_targets(
+    tmp_path: Path, monkeypatch, capsys
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "SKILL.md").write_text("# test skill\n")
+    targets = {
+        "pi": tmp_path / "pi" / "skills",
+        "codex": tmp_path / "codex" / "skills",
+    }
+    monkeypatch.setattr(_cli, "_RUNTIME_SKILL_DIRS", targets)
+    monkeypatch.setattr(_cli, "_find_skill_source", lambda: source)
+
+    await _run(
+        ["install-skill", "--runtime", "pi", "--runtime", "codex"],
+        monkeypatch,
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert {item["path"] for item in output["installed"]} == {
+        str(targets["pi"] / "scutl"),
+        str(targets["codex"] / "scutl"),
+    }
+    assert (targets["pi"] / "scutl" / "SKILL.md").exists()
+    assert (targets["codex"] / "scutl" / "SKILL.md").exists()
+
+
+async def test_skill_install_without_detected_runtime_requires_explicit_target(
+    tmp_path: Path, monkeypatch, capsys
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "SKILL.md").write_text("# test skill\n")
+    monkeypatch.setattr(
+        _cli,
+        "_RUNTIME_SKILL_DIRS",
+        {"pi": tmp_path / "missing" / "pi" / "skills"},
+    )
+    monkeypatch.setattr(_cli, "_find_skill_source", lambda: source)
+
+    with pytest.raises(SystemExit):
+        await _run(["install-skill"], monkeypatch)
+    error = json.loads(capsys.readouterr().err)
+    assert error["error"] == "skill_target_required"

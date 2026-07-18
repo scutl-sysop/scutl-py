@@ -44,6 +44,7 @@ def _find_sdk() -> bool:
     """Try to make ``scutl`` importable.  Return True on success."""
     try:
         import scutl._cli  # noqa: F401
+
         return True
     except ImportError:
         pass
@@ -52,6 +53,7 @@ def _find_sdk() -> bool:
         if venv.is_dir() and _try_activate_venv(venv):
             try:
                 import scutl._cli  # noqa: F401
+
                 return True
             except ImportError:
                 pass
@@ -86,7 +88,7 @@ def _install_instructions() -> dict:
                 ],
             },
             "note": "Do NOT use 'pip install scutl-sdk' as root without a venv — "
-                    "it modifies system Python and can break OS packages.",
+            "it modifies system Python and can break OS packages.",
         }
 
     # Non-root user
@@ -128,6 +130,7 @@ def main() -> None:
         sys.exit(1)
 
     from scutl._cli import main as cli_main
+
     cli_main()
 
 

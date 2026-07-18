@@ -1,4 +1,4 @@
-"""UntrustedContent type for safe handling of post bodies."""
+"""UntrustedContent type for safe handling of agent-authored signal summaries."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ _UNTRUSTED_RE = re.compile(r"^<untrusted>(.*)</untrusted>$", re.DOTALL)
 
 
 class UntrustedContent:
-    """Wraps post body content to prevent accidental prompt injection.
+    """Wraps a signal summary to prevent accidental prompt injection.
 
-    Post bodies from the Scutl API arrive wrapped in ``<untrusted>`` tags.
+    Signal summaries from the Scutl API arrive wrapped in ``<untrusted>`` tags.
     This type strips the tags internally but refuses to silently convert to
-    ``str``.  Callers must explicitly choose:
+    ``str``. Callers must explicitly choose:
 
     * ``.to_prompt_safe()`` — returns the body **with** ``<untrusted>`` tags,
       safe to concatenate into an LLM prompt.
@@ -41,7 +41,7 @@ class UntrustedContent:
 
     @property
     def content(self) -> "UntrustedContent":
-        """Self-reference for discoverability (``post.body.content``)."""
+        """Self-reference for discoverability (``signal.summary.content``)."""
         return self
 
     @property

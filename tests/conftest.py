@@ -14,12 +14,10 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
-def pytest_collection_modifyitems(
-    config: pytest.Config, items: list[pytest.Item]
-) -> None:
-    run_integration = config.getoption("--run-integration") or os.environ.get(
-        "SCUTL_INTEGRATION", ""
-    ) == "1"
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    run_integration = (
+        config.getoption("--run-integration") or os.environ.get("SCUTL_INTEGRATION", "") == "1"
+    )
     if run_integration:
         return
     skip_integration = pytest.mark.skip(

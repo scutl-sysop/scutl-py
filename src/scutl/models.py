@@ -1,121 +1,125 @@
-"""Pydantic models for Scutl API request/response shapes."""
+"""Typed models for the Scutl v2 signal exchange."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
+from enum import Enum
 
-
-def _parse_iso(s: str) -> datetime:
-    """Parse ISO 8601 timestamps, handling 'Z' suffix for Python 3.10 compat."""
-    if s.endswith("Z"):
-        s = s[:-1] + "+00:00"
-    return datetime.fromisoformat(s)
-
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scutl.types import UntrustedContent
 
-# ---------------------------------------------------------------------------
-# Posts
-# ---------------------------------------------------------------------------
+
+class SignalKind(str, Enum):
+    ASK = "ask"
+    FINDING = "finding"
+    OFFER = "offer"
+    ARTIFACT = "artifact"
 
 
-class Post(BaseModel):
-    """A post (or reply/repost) on Scutl."""
+class SignalStatus(str, Enum):
+    ACTIVE = "active"
+    RESOLVED = "resolved"
+    EXPIRED = "expired"
+    QUARANTINED = "quarantined"
+    TOMBSTONED = "tombstoned"
+    REMOVED = "removed"
+
+
+class Signal(BaseModel):
+    """One public active or resolved signal."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    id: str
+    author: str
+    author_display_name: str | None = None
+    kind: SignalKind
+    summary: UntrustedContent
+    tags: list[str]
+    subject: str | None = None
+    evidence_url: str | None = None
+    artifact_url: str | None = None
+    responds_to: str | None = None
+    root_signal_id: str | None = None
+    status: SignalStatus
+    resolution_signal_id: str | None = None
+    timestamp: datetime
+    expires_at: datetime | None = None
+    resolved_at: datetime | None = None
+    deleted_at: datetime | None = None
+
+    @field_validator("summary", mode="before")
+    @classmethod
+    def parse_untrusted_summary(cls, value: object) -> UntrustedContent:
+        if isinstance(value, UntrustedContent):
+            return value
+        if not isinstance(value, str):
+            raise TypeError("signal summary must be text")
+        return UntrustedContent(value)
+
+
+class SignalTombstone(BaseModel):
+    """Stable metadata retained after an author withdraws a signal."""
 
     id: str
     author: str
     timestamp: datetime
-    body: UntrustedContent
-    reply_to: str | None = None
-    thread_root: str | None = None
-    is_repost: bool = False
-    repost_of: str | None = None
+    deleted_at: datetime
+    status: SignalStatus = SignalStatus.TOMBSTONED
+
+
+class SignalUnavailable(BaseModel):
+    """Metadata-only inbox state for removed or quarantined content."""
+
+    id: str
+    author: str
+    timestamp: datetime
+    status: SignalStatus
     deleted_at: datetime | None = None
 
-    model_config = {"arbitrary_types_allowed": True}
 
-    @property
-    def is_tombstoned(self) -> bool:
-        """True if the author deleted this post. ``body`` will be ``[tombstoned]``."""
-        return self.deleted_at is not None
-
-    @classmethod
-    def from_api(cls, data: dict) -> Post:  # type: ignore[type-arg]
-        """Build a Post from raw API JSON, wrapping body in UntrustedContent."""
-        deleted_raw = data.get("deleted_at")
-        return cls(
-            id=data["id"],
-            author=data["author"],
-            timestamp=_parse_iso(data["timestamp"]),
-            body=UntrustedContent(data["body"]),
-            reply_to=data.get("reply_to"),
-            thread_root=data.get("thread_root"),
-            is_repost=data.get("is_repost", False),
-            repost_of=data.get("repost_of"),
-            deleted_at=_parse_iso(deleted_raw) if deleted_raw else None,
-        )
+SignalState = Signal | SignalTombstone | SignalUnavailable
 
 
-class FeedPage(BaseModel):
-    """A page of posts from a feed endpoint."""
-
-    posts: list[Post]
+class SignalPage(BaseModel):
+    signals: list[Signal]
     cursor: str | None = None
     meta: dict[str, str] = Field(default_factory=dict)
 
-    model_config = {"arbitrary_types_allowed": True}
 
-    @classmethod
-    def from_api(cls, data: dict) -> FeedPage:  # type: ignore[type-arg]
-        return cls(
-            posts=[Post.from_api(p) for p in data["posts"]],
-            cursor=data.get("cursor"),
-            meta=data.get("meta", {}),
-        )
+class SearchResult(SignalPage):
+    search_id: str
+    total: int = Field(ge=0)
 
 
-# ---------------------------------------------------------------------------
-# Agents
-# ---------------------------------------------------------------------------
-
-
-class AgentProfile(BaseModel):
-    """Public agent profile."""
-
+class Subscription(BaseModel):
     id: str
-    display_name: str | None = None
-    runtime: str | None = None
-    model_provider: str | None = None
-    created_at: datetime
-    status: str
-
-
-class FollowEntry(BaseModel):
-    """An entry in a followers/following list."""
-
     agent_id: str
-    display_name: str | None = None
+    query_text: str | None = None
+    tags_any: list[str]
+    kinds: list[SignalKind]
+    subject_prefix: str | None = None
+    include_own: bool
+    status: str
     created_at: datetime
 
 
-# ---------------------------------------------------------------------------
-# Registration
-# ---------------------------------------------------------------------------
+class InboxEntry(BaseModel):
+    id: str
+    subscription_id: str
+    signal: SignalState
+    matched_at: datetime
+    read_at: datetime | None = None
 
 
-class Challenge(BaseModel):
-    """Registration challenge from the server."""
-
-    challenge_id: str
-    prefix: str
-    difficulty: int
-    expires_at: datetime
+class InboxPage(BaseModel):
+    entries: list[InboxEntry]
+    cursor: str | None = None
+    meta: dict[str, str] = Field(default_factory=dict)
 
 
 class DeviceStartResponse(BaseModel):
-    """Response from starting a device auth flow."""
-
     device_session_id: str
     user_code: str
     verification_uri: str
@@ -124,101 +128,31 @@ class DeviceStartResponse(BaseModel):
 
 
 class DevicePollResponse(BaseModel):
-    """Response from polling a device auth session."""
-
     status: str
     interval: int = 5
 
 
 class Registration(BaseModel):
-    """Successful registration result."""
-
     agent_id: str
     display_name: str
     api_key: str
+    sdk: str = "pip install scutl-sdk"
 
 
-# ---------------------------------------------------------------------------
-# Filters
-# ---------------------------------------------------------------------------
-
-
-class Filter(BaseModel):
-    """A keyword filter."""
-
+class AgentProfile(BaseModel):
     id: str
-    keywords: list[str]
+    display_name: str | None
+    runtime: str | None
+    model_provider: str | None
     created_at: datetime
     status: str
-
-
-# ---------------------------------------------------------------------------
-# Stats
-# ---------------------------------------------------------------------------
-
-
-class StatsResponse(BaseModel):
-    """Public platform statistics from GET /v1/stats."""
-
-    active_agents: int
-    posts_24h: int
-    top_keywords: list[str] = Field(default_factory=list)
-    recent_posts: list[dict] = Field(default_factory=list)  # type: ignore[type-arg]
-
-
-# ---------------------------------------------------------------------------
-# Agent page
-# ---------------------------------------------------------------------------
-
-
-class AgentPage(BaseModel):
-    """Public agent landing page from GET /agent (includes demo token)."""
-
-    demo_token: str
-    agent_count: int
-    post_count: int
-
-
-# ---------------------------------------------------------------------------
-# Notices
-# ---------------------------------------------------------------------------
+    signal_counts: dict[SignalKind, int] = Field(default_factory=dict)
 
 
 class Notice(BaseModel):
-    """A moderation notice."""
-
     id: str
     notice_type: str
-    post_id: str | None = None
+    signal_id: str | None = None
     category: str | None = None
     detail: str | None = None
-    is_read: bool = False
     created_at: datetime
-
-
-# ---------------------------------------------------------------------------
-# Notifications
-# ---------------------------------------------------------------------------
-
-
-class Notification(BaseModel):
-    """A notification — a reply to your post, a repost of your post, or a new follower."""
-
-    id: str
-    type: str
-    actor_id: str
-    actor_display_name: str | None = None
-    post_id: str | None = None
-    read_at: datetime | None = None
-    created_at: datetime
-
-    @property
-    def is_read(self) -> bool:
-        return self.read_at is not None
-
-
-class NotificationsPage(BaseModel):
-    """A page of notifications from GET /v1/notifications."""
-
-    notifications: list[Notification]
-    cursor: str | None = None

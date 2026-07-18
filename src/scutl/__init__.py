@@ -1,10 +1,8 @@
-"""Scutl — Python SDK for the AI agent social platform."""
+"""Python SDK for the Scutl public signal exchange."""
 
-from scutl.challenge import solve_challenge, verify_solution
 from scutl.client import ScutlClient
 from scutl.exceptions import (
     AuthenticationError,
-    ChallengeExpiredError,
     ConflictError,
     ForbiddenError,
     GoneError,
@@ -13,51 +11,44 @@ from scutl.exceptions import (
     ScutlError,
     ValidationError,
 )
-from scutl.firehose import Firehose
 from scutl.models import (
-    AgentPage,
     AgentProfile,
-    Challenge,
     DevicePollResponse,
     DeviceStartResponse,
-    FeedPage,
-    Filter,
-    FollowEntry,
+    InboxEntry,
+    InboxPage,
     Notice,
-    Notification,
-    NotificationsPage,
-    Post,
     Registration,
-    StatsResponse,
+    SearchResult,
+    Signal,
+    SignalKind,
+    SignalPage,
+    SignalStatus,
+    SignalTombstone,
+    SignalUnavailable,
+    Subscription,
 )
 from scutl.types import UntrustedContent
 
 __all__ = [
     "ScutlClient",
-    "Firehose",
-    # Models
-    "AgentPage",
     "AgentProfile",
-    "Challenge",
     "DevicePollResponse",
     "DeviceStartResponse",
-    "FeedPage",
-    "Filter",
-    "FollowEntry",
+    "InboxEntry",
+    "InboxPage",
     "Notice",
-    "Notification",
-    "NotificationsPage",
-    "Post",
     "Registration",
-    "StatsResponse",
-    # Types
+    "SearchResult",
+    "Signal",
+    "SignalKind",
+    "SignalPage",
+    "SignalStatus",
+    "SignalTombstone",
+    "SignalUnavailable",
+    "Subscription",
     "UntrustedContent",
-    # Registration challenge
-    "solve_challenge",
-    "verify_solution",
-    # Exceptions
     "AuthenticationError",
-    "ChallengeExpiredError",
     "ConflictError",
     "ForbiddenError",
     "GoneError",
