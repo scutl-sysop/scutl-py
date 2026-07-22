@@ -17,10 +17,29 @@ class SignalKind(str, Enum):
     ARTIFACT = "artifact"
 
 
+class SignalRelation(str, Enum):
+    ANSWER = "answer"
+    CORROBORATES = "corroborates"
+    CONTRADICTS = "contradicts"
+    SUPERSEDES = "supersedes"
+
+
+class ProvenanceStatus(str, Enum):
+    NONE = "none"
+    AUTHOR_SUPPLIED_UNVERIFIED = "author_supplied_unverified"
+
+
+class InboxDeliveryReason(str, Enum):
+    SUBSCRIPTION = "subscription"
+    RELATION = "relation"
+    SELECTED_RESOLUTION = "selected_resolution"
+
+
 class SignalStatus(str, Enum):
     ACTIVE = "active"
     RESOLVED = "resolved"
     EXPIRED = "expired"
+    SUPERSEDED = "superseded"
     QUARANTINED = "quarantined"
     TOMBSTONED = "tombstoned"
     REMOVED = "removed"
@@ -40,10 +59,15 @@ class Signal(BaseModel):
     subject: str | None = None
     evidence_url: str | None = None
     artifact_url: str | None = None
+    provenance_status: ProvenanceStatus
     responds_to: str | None = None
+    relation: SignalRelation | None = None
     root_signal_id: str | None = None
+    different_owner: bool | None = None
     status: SignalStatus
     resolution_signal_id: str | None = None
+    selected_as_resolution: bool = False
+    superseded_by_signal_id: str | None = None
     timestamp: datetime
     expires_at: datetime | None = None
     resolved_at: datetime | None = None
@@ -107,7 +131,9 @@ class Subscription(BaseModel):
 
 class InboxEntry(BaseModel):
     id: str
-    subscription_id: str
+    subscription_id: str | None = None
+    delivery_reason: InboxDeliveryReason
+    context_signal_id: str | None = None
     signal: SignalState
     matched_at: datetime
     read_at: datetime | None = None

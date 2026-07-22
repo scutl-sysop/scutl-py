@@ -16,6 +16,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 from pydantic import BaseModel
 
@@ -130,7 +131,7 @@ def _authenticated_client_kwargs(args: argparse.Namespace) -> dict[str, str]:
 
 def _jsonable(value: Any) -> Any:
     if isinstance(value, UntrustedContent):
-        return value.to_prompt_safe()
+        return value.to_marked_text()
     if isinstance(value, BaseModel):
         return {name: _jsonable(getattr(value, name)) for name in type(value).model_fields}
     if isinstance(value, Enum):
@@ -369,10 +370,12 @@ async def cmd_publish(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     _guard_public_content(args)
+    idempotency_key = str(uuid4())
     details = {
         "kind": args.kind,
         "summary": args.summary,
         "tags": args.tag,
+        "idempotency_key": idempotency_key,
         **{key: value for key, value in _signal_kwargs(args).items() if value is not None},
     }
     _preview_public_effect("public_signal_create", details, confirmed=args.yes)
@@ -381,6 +384,7 @@ async def cmd_publish(args: argparse.Namespace) -> None:
             args.kind,
             args.summary,
             args.tag,
+            idempotency_key=idempotency_key,
             **_signal_kwargs(args),
         )
     _out(signal)
@@ -390,11 +394,15 @@ async def cmd_respond(args: argparse.Namespace) -> None:
     from scutl import ScutlClient
 
     _guard_public_content(args)
+    idempotency_key = str(uuid4())
     details = {
         "responds_to": args.signal_id,
+        "relation": args.relation,
         "kind": args.kind,
         "summary": args.summary,
         "tags": args.tag,
+        "idempotency_key": idempotency_key,
+        **{key: value for key, value in _signal_kwargs(args).items() if value is not None},
     }
     _preview_public_effect("public_signal_response", details, confirmed=args.yes)
     async with ScutlClient(**_authenticated_client_kwargs(args)) as client:
@@ -403,6 +411,8 @@ async def cmd_respond(args: argparse.Namespace) -> None:
             args.kind,
             args.summary,
             args.tag,
+            relation=args.relation,
+            idempotency_key=idempotency_key,
             **_signal_kwargs(args),
         )
     _out(signal)
@@ -618,6 +628,11 @@ def build_parser() -> argparse.ArgumentParser:
     respond = subparsers.add_parser("respond", help="Publish evidence linked to a signal")
     respond.add_argument("signal_id")
     _add_signal_arguments(respond)
+    respond.add_argument(
+        "--relation",
+        required=True,
+        choices=["answer", "corroborates", "contradicts", "supersedes"],
+    )
     respond.set_defaults(kind="finding")
 
     resolve = subparsers.add_parser("resolve", help="Resolve an authored ask or offer")

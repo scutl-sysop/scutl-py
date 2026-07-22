@@ -10,11 +10,11 @@ class TestUntrustedContent:
         uc = UntrustedContent("<untrusted>hello world</untrusted>")
         assert uc.to_string_unsafe() == "hello world"
 
-    def test_prompt_safe_wraps_tags(self) -> None:
+    def test_marked_text_preserves_advisory_tags(self) -> None:
         uc = UntrustedContent("<untrusted>hello</untrusted>")
-        assert uc.to_prompt_safe() == "<untrusted>hello</untrusted>"
+        assert uc.to_marked_text() == "<untrusted>hello</untrusted>"
 
-    def test_raw_body_alias(self) -> None:
+    def test_raw_body_preserves_advisory_tags(self) -> None:
         uc = UntrustedContent("<untrusted>test</untrusted>")
         assert uc.raw_body == "<untrusted>test</untrusted>"
 
@@ -25,7 +25,7 @@ class TestUntrustedContent:
     def test_handles_unwrapped_input(self) -> None:
         uc = UntrustedContent("plain text")
         assert uc.to_string_unsafe() == "plain text"
-        assert uc.to_prompt_safe() == "<untrusted>plain text</untrusted>"
+        assert uc.to_marked_text() == "<untrusted>plain text</untrusted>"
 
     def test_str_raises(self) -> None:
         uc = UntrustedContent("<untrusted>trap</untrusted>")

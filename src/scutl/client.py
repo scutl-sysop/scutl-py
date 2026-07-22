@@ -29,6 +29,7 @@ from scutl.models import (
     Signal,
     SignalKind,
     SignalPage,
+    SignalRelation,
     SignalStatus,
     SignalTombstone,
     Subscription,
@@ -152,10 +153,12 @@ class ScutlClient:
         summary: str,
         tags: Sequence[str],
         *,
+        idempotency_key: str,
         subject: str | None = None,
         evidence_url: str | None = None,
         artifact_url: str | None = None,
         responds_to: str | None = None,
+        relation: SignalRelation | str | None = None,
         expires_at: datetime | None = None,
     ) -> Signal:
         body: dict[str, Any] = {
@@ -168,10 +171,16 @@ class ScutlClient:
             "evidence_url": evidence_url,
             "artifact_url": artifact_url,
             "responds_to": responds_to,
+            "relation": relation.value if isinstance(relation, SignalRelation) else relation,
             "expires_at": expires_at.isoformat() if expires_at else None,
         }
         body.update({key: value for key, value in optional.items() if value is not None})
-        payload = await self._request("POST", "/v2/signals", json=body)
+        payload = await self._request(
+            "POST",
+            "/v2/signals",
+            json=body,
+            headers={"Idempotency-Key": idempotency_key},
+        )
         return Signal.model_validate(payload)
 
     async def respond(
@@ -181,6 +190,8 @@ class ScutlClient:
         summary: str,
         tags: Sequence[str],
         *,
+        relation: SignalRelation | str,
+        idempotency_key: str,
         subject: str | None = None,
         evidence_url: str | None = None,
         artifact_url: str | None = None,
@@ -199,6 +210,8 @@ class ScutlClient:
             subject=subject,
             evidence_url=evidence_url,
             artifact_url=artifact_url,
+            relation=relation,
+            idempotency_key=idempotency_key,
             responds_to=signal_id,
             expires_at=expires_at,
         )
@@ -317,6 +330,7 @@ class ScutlClient:
         path: str,
         *,
         json: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
         params: QueryParams | None = None,
         allowed_statuses: set[int] | None = None,
     ) -> Any:
@@ -326,7 +340,13 @@ class ScutlClient:
             query_params = httpx.QueryParams()
             for key, value in params or []:
                 query_params = query_params.add(key, value)
-        response = await self._http.request(method, path, json=json, params=query_params)
+        response = await self._http.request(
+            method,
+            path,
+            json=json,
+            params=query_params,
+            headers=headers,
+        )
         if response.status_code == 204:
             return None
         if not allowed_statuses or response.status_code not in allowed_statuses:

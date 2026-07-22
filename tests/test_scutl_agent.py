@@ -57,11 +57,13 @@ class FakeClient:
 
     async def publish(self, *args, **kwargs):
         self.calls.append(("publish", args, kwargs))
-        return Signal.model_validate({**SIGNAL_JSON, "responds_to": kwargs.get("responds_to")})
+        return Signal.model_validate(
+            {**SIGNAL_JSON, "responds_to": None, "relation": None, "different_owner": None}
+        )
 
     async def respond(self, *args, **kwargs):
         self.calls.append(("respond", args, kwargs))
-        return Signal.model_validate(SIGNAL_JSON)
+        return Signal.model_validate({**SIGNAL_JSON, "relation": kwargs.get("relation")})
 
     async def resolve(self, *args, **kwargs):
         self.calls.append(("resolve", args, kwargs))
@@ -118,6 +120,8 @@ class FakeClient:
                     {
                         "id": "inbox_cli",
                         "subscription_id": "sub_cli",
+                        "delivery_reason": "subscription",
+                        "context_signal_id": None,
                         "signal": SIGNAL_JSON,
                         "matched_at": "2026-07-18T12:01:00Z",
                         "read_at": None,
@@ -228,6 +232,7 @@ async def test_get_signal_serializes_tombstone_without_missing_content(monkeypat
 
 async def test_publish_previews_public_effect_and_requires_confirmation(monkeypatch, capsys):
     _save_account()
+    monkeypatch.setattr(_cli, "uuid4", lambda: "publish-uuid")
     await _run(
         [
             "publish",
@@ -245,9 +250,35 @@ async def test_publish_previews_public_effect_and_requires_confirmation(monkeypa
     captured = capsys.readouterr()
     preview = json.loads(captured.err.splitlines()[0])
     assert preview["effect"] == "public_signal_create"
+    assert preview["idempotency_key"] == "publish-uuid"
+    assert FakeClient.instances[-1].calls[0][2]["idempotency_key"] == "publish-uuid"
     assert preview["public"] is True
     assert json.loads(captured.out)["id"] == "sig_example"
     assert FakeClient.instances[-1].calls[0][0] == "publish"
+
+
+async def test_publish_cancellation_stops_before_network(monkeypatch, capsys) -> None:
+    _save_account()
+    monkeypatch.setattr(_cli, "uuid4", lambda: "cancelled-uuid")
+    with pytest.raises(SystemExit):
+        await _run(
+            [
+                "publish",
+                "--kind",
+                "finding",
+                "--summary",
+                "asyncpg owns the connection",
+                "--tag",
+                "python",
+                "--evidence-url",
+                "https://example.com/evidence",
+            ],
+            monkeypatch,
+            confirm="n",
+        )
+    output = capsys.readouterr()
+    assert json.loads(output.err.splitlines()[0])["idempotency_key"] == "cancelled-uuid"
+    assert FakeClient.instances == []
 
 
 async def test_publish_rejects_likely_secret_before_network(monkeypatch, capsys):
@@ -276,12 +307,15 @@ async def test_publish_rejects_likely_secret_before_network(monkeypatch, capsys)
 
 async def test_respond_and_resolve_have_distinct_public_previews(monkeypatch, capsys):
     _save_account()
+    monkeypatch.setattr(_cli, "uuid4", lambda: "respond-uuid")
     await _run(
         [
             "respond",
             "sig_parent",
             "--kind",
             "finding",
+            "--relation",
+            "answer",
             "--summary",
             "confirmed with evidence",
             "--tag",
@@ -294,6 +328,11 @@ async def test_respond_and_resolve_have_distinct_public_previews(monkeypatch, ca
     )
     first = capsys.readouterr()
     assert json.loads(first.err)["effect"] == "public_signal_response"
+    response_preview = json.loads(first.err)
+    assert response_preview["relation"] == "answer"
+    assert response_preview["idempotency_key"] == "respond-uuid"
+    assert FakeClient.instances[-1].calls[0][2]["relation"] == "answer"
+    assert FakeClient.instances[-1].calls[0][2]["idempotency_key"] == "respond-uuid"
     await _run(
         [
             "resolve",
@@ -330,6 +369,35 @@ async def test_subscription_and_inbox_commands_preserve_json_contract(monkeypatc
         "status": "ok",
         "cursor": "inbox_cli",
     }
+
+
+def test_respond_parser_requires_a_typed_relation() -> None:
+    parser = _cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "respond",
+                "sig_parent",
+                "--kind",
+                "finding",
+                "--summary",
+                "confirmed",
+                "--tag",
+                "python",
+                "--evidence-url",
+                "https://example.com/evidence",
+            ]
+        )
+
+
+def test_bundled_skill_keeps_trust_and_publication_contract() -> None:
+    skill = Path(__file__).parents[1].joinpath("skills/scutl/SKILL.md").read_text()
+    retired_extractor = "to_" + "prompt_safe"
+    assert "advisory defense in depth, not as a sandbox" in skill
+    assert "author-supplied and unverified" in skill
+    assert "--relation answer" in skill
+    assert "CLI-generated idempotency key" in skill
+    assert retired_extractor not in skill
 
 
 def test_account_write_is_private_and_preserves_existing_account(tmp_path: Path):

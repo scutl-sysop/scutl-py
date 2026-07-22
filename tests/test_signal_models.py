@@ -3,10 +3,13 @@ from datetime import datetime, timezone
 import pytest
 
 from scutl.models import (
+    InboxDeliveryReason,
     InboxPage,
+    ProvenanceStatus,
     SearchResult,
     Signal,
     SignalKind,
+    SignalRelation,
     SignalStatus,
     SignalTombstone,
     Subscription,
@@ -24,9 +27,14 @@ SIGNAL_JSON = {
     "evidence_url": "https://example.com/evidence",
     "artifact_url": None,
     "responds_to": "sig_parent",
+    "provenance_status": "author_supplied_unverified",
+    "relation": "corroborates",
     "root_signal_id": "sig_parent",
     "status": "active",
     "resolution_signal_id": None,
+    "different_owner": True,
+    "selected_as_resolution": False,
+    "superseded_by_signal_id": None,
     "timestamp": "2026-07-18T12:00:00Z",
     "expires_at": None,
     "resolved_at": None,
@@ -39,13 +47,32 @@ def test_signal_parses_enums_timestamps_and_untrusted_summary() -> None:
     assert signal.kind is SignalKind.FINDING
     assert signal.status is SignalStatus.ACTIVE
     assert signal.timestamp == datetime(2026, 7, 18, 12, tzinfo=timezone.utc)
+    assert signal.provenance_status is ProvenanceStatus.AUTHOR_SUPPLIED_UNVERIFIED
+    assert signal.relation is SignalRelation.CORROBORATES
+    assert signal.different_owner is True
+    assert signal.selected_as_resolution is False
+    assert signal.superseded_by_signal_id is None
     assert isinstance(signal.summary, UntrustedContent)
     assert signal.summary.to_string_unsafe() == "asyncpg owns the connection"
-    assert signal.summary.to_prompt_safe() == (
+    assert signal.summary.to_marked_text() == (
         "<untrusted>asyncpg owns the connection</untrusted>"
     )
     with pytest.raises(TypeError):
         str(signal.summary)
+
+
+def test_signal_parses_supersession_and_none_provenance_metadata() -> None:
+    signal = Signal.model_validate(
+        {
+            **SIGNAL_JSON,
+            "status": "superseded",
+            "provenance_status": "none",
+            "superseded_by_signal_id": "sig_replacement",
+        }
+    )
+    assert signal.status is SignalStatus.SUPERSEDED
+    assert signal.provenance_status is ProvenanceStatus.NONE
+    assert signal.superseded_by_signal_id == "sig_replacement"
 
 
 def test_search_result_preserves_cursor_total_warning_and_signal_safety() -> None:
@@ -98,13 +125,17 @@ def test_subscription_and_inbox_parse_discriminated_signal_states() -> None:
                 {
                     "id": "inbox_example",
                     "subscription_id": subscription.id,
+                    "delivery_reason": "relation",
+                    "context_signal_id": "sig_parent",
                     "signal": SIGNAL_JSON,
                     "matched_at": "2026-07-18T12:01:00Z",
                     "read_at": None,
                 },
                 {
                     "id": "inbox_deleted",
-                    "subscription_id": subscription.id,
+                    "subscription_id": None,
+                    "delivery_reason": "selected_resolution",
+                    "context_signal_id": "sig_example",
                     "signal": {
                         "id": "sig_deleted",
                         "author": "agent_author",
@@ -122,5 +153,9 @@ def test_subscription_and_inbox_parse_discriminated_signal_states() -> None:
     )
     assert subscription.kinds == [SignalKind.FINDING, SignalKind.ARTIFACT]
     assert isinstance(inbox.entries[0].signal, Signal)
+    assert inbox.entries[0].delivery_reason is InboxDeliveryReason.RELATION
+    assert inbox.entries[0].context_signal_id == "sig_parent"
+    assert inbox.entries[1].subscription_id is None
+    assert inbox.entries[1].delivery_reason is InboxDeliveryReason.SELECTED_RESOLUTION
     assert isinstance(inbox.entries[1].signal, SignalTombstone)
     assert inbox.entries[1].read_at is not None

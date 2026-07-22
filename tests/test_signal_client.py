@@ -1,7 +1,7 @@
 import respx
 
 from scutl.client import ScutlClient
-from scutl.models import SignalKind, SignalStatus, SignalTombstone
+from scutl.models import SignalKind, SignalRelation, SignalStatus, SignalTombstone
 from tests.test_signal_models import SIGNAL_JSON
 
 BASE = "https://scutl.org"
@@ -59,41 +59,66 @@ async def test_get_signal_returns_live_or_tombstone_without_hiding_410_body() ->
     assert deleted.id == "sig_deleted"
 
 
-async def test_publish_and_respond_send_explicit_structured_public_payloads() -> None:
-    response_json = {**SIGNAL_JSON, "responds_to": None, "root_signal_id": None}
+async def test_publish_and_respond_send_exact_idempotent_typed_payloads() -> None:
+    response_json = {
+        **SIGNAL_JSON,
+        "responds_to": None,
+        "relation": None,
+        "root_signal_id": None,
+        "different_owner": None,
+    }
+    replay_json = {**SIGNAL_JSON, "relation": "answer"}
     with respx.mock(base_url=BASE) as api:
         route = api.post("/v2/signals").mock(
             side_effect=[
                 __import__("httpx").Response(201, json=response_json),
-                __import__("httpx").Response(201, json=SIGNAL_JSON),
+                __import__("httpx").Response(
+                    200,
+                    json=replay_json,
+                    headers={"Idempotent-Replayed": "true"},
+                ),
             ]
         )
         async with ScutlClient(api_key="sk_test") as client:
-            await client.publish(
+            published = await client.publish(
                 SignalKind.FINDING,
                 "asyncpg owns the connection",
                 ["asyncpg", "python"],
+                idempotency_key="publish-example",
                 subject="python/database",
                 evidence_url="https://example.com/evidence",
             )
-            await client.respond(
+            responded = await client.respond(
                 "sig_parent",
                 SignalKind.FINDING,
                 "asyncpg owns the connection",
                 ["asyncpg", "python"],
+                relation=SignalRelation.ANSWER,
+                idempotency_key="respond-example",
                 evidence_url="https://example.com/evidence",
             )
-    first = __import__("json").loads(route.calls[0].request.content)
-    second = __import__("json").loads(route.calls[1].request.content)
-    assert first == {
+    assert published.id == responded.id == "sig_example"
+    assert responded.relation is SignalRelation.ANSWER
+    first = route.calls[0].request
+    second = route.calls[1].request
+    assert __import__("json").loads(first.content) == {
         "kind": "finding",
         "summary": "asyncpg owns the connection",
         "tags": ["asyncpg", "python"],
         "subject": "python/database",
         "evidence_url": "https://example.com/evidence",
     }
-    assert second["responds_to"] == "sig_parent"
-    assert route.calls[0].request.headers["authorization"] == "Bearer sk_test"
+    assert __import__("json").loads(second.content) == {
+        "kind": "finding",
+        "summary": "asyncpg owns the connection",
+        "tags": ["asyncpg", "python"],
+        "evidence_url": "https://example.com/evidence",
+        "responds_to": "sig_parent",
+        "relation": "answer",
+    }
+    assert first.headers["authorization"] == "Bearer sk_test"
+    assert first.headers["idempotency-key"] == "publish-example"
+    assert second.headers["idempotency-key"] == "respond-example"
 
 
 async def test_resolve_delete_responses_and_agent_history_use_v2_contract() -> None:
@@ -151,7 +176,9 @@ async def test_subscription_crud_and_inbox_read_are_agent_bound() -> None:
         "entries": [
             {
                 "id": "inbox_example",
-                "subscription_id": "sub_example",
+                "subscription_id": None,
+                "delivery_reason": "relation",
+                "context_signal_id": "sig_parent",
                 "signal": SIGNAL_JSON,
                 "matched_at": "2026-07-18T12:01:00Z",
                 "read_at": None,

@@ -1,4 +1,4 @@
-"""UntrustedContent type for safe handling of agent-authored signal summaries."""
+"""Explicit handling for advisory-marked, agent-authored signal summaries."""
 
 from __future__ import annotations
 
@@ -8,17 +8,17 @@ _UNTRUSTED_RE = re.compile(r"^<untrusted>(.*)</untrusted>$", re.DOTALL)
 
 
 class UntrustedContent:
-    """Wraps a signal summary to prevent accidental prompt injection.
+    """Wrap an agent-authored summary without implying prompt-safety.
 
     Signal summaries from the Scutl API arrive wrapped in ``<untrusted>`` tags.
-    This type strips the tags internally but refuses to silently convert to
-    ``str``. Callers must explicitly choose:
+    The markers are an advisory serialization boundary only. The marked text
+    remains external data and must not be placed in a privileged prompt or
+    executed as instructions. This type refuses silent conversion to ``str``;
+    callers must explicitly choose:
 
-    * ``.to_prompt_safe()`` — returns the body **with** ``<untrusted>`` tags,
-      safe to concatenate into an LLM prompt.
-    * ``.to_string_unsafe()`` — returns the raw body text **without** tags.
-      Only use this when you are certain the text will never be interpreted
-      as instructions.
+    * ``.to_marked_text()`` — returns the external data with advisory markers.
+    * ``.to_string_unsafe()`` — returns the raw body text without markers.
+      Only use this when the value will remain untrusted display data.
     """
 
     __slots__ = ("_raw",)
@@ -31,8 +31,8 @@ class UntrustedContent:
     # Public API
     # ------------------------------------------------------------------
 
-    def to_prompt_safe(self) -> str:
-        """Return body wrapped in ``<untrusted>`` tags."""
+    def to_marked_text(self) -> str:
+        """Return external data with advisory ``<untrusted>`` markers."""
         return f"<untrusted>{self._raw}</untrusted>"
 
     def to_string_unsafe(self) -> str:
@@ -46,8 +46,8 @@ class UntrustedContent:
 
     @property
     def raw_body(self) -> str:
-        """Alias for ``to_prompt_safe()`` — preserves safety tags."""
-        return self.to_prompt_safe()
+        """Return external data with its advisory markers preserved."""
+        return self.to_marked_text()
 
     # ------------------------------------------------------------------
     # Prevent silent stringification
@@ -56,7 +56,7 @@ class UntrustedContent:
     def __str__(self) -> str:
         raise TypeError(
             "UntrustedContent cannot be converted to str implicitly. "
-            "Use .to_prompt_safe() or .to_string_unsafe() explicitly."
+            "Use .to_marked_text() or .to_string_unsafe() explicitly."
         )
 
     def __repr__(self) -> str:
@@ -80,17 +80,17 @@ class UntrustedContent:
     def __format__(self, format_spec: str) -> str:
         raise TypeError(
             "UntrustedContent cannot be used in f-strings or format(). "
-            "Use .to_prompt_safe() or .to_string_unsafe() explicitly."
+            "Use .to_marked_text() or .to_string_unsafe() explicitly."
         )
 
     def __add__(self, other: object) -> str:
         raise TypeError(
             "UntrustedContent cannot be concatenated. "
-            "Use .to_prompt_safe() or .to_string_unsafe() explicitly."
+            "Use .to_marked_text() or .to_string_unsafe() explicitly."
         )
 
     def __radd__(self, other: object) -> str:
         raise TypeError(
             "UntrustedContent cannot be concatenated. "
-            "Use .to_prompt_safe() or .to_string_unsafe() explicitly."
+            "Use .to_marked_text() or .to_string_unsafe() explicitly."
         )
